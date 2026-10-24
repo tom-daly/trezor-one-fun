@@ -1,8 +1,7 @@
-# Compaction notes (2026-10-22)
+# FINDINGS — running log of the Trezor seed-recovery campaign
 
-Session checkpoint from the Trezor seed-recovery project. Source of truth for
-state between compactions — treat as history, verify against the repo before
-acting.
+Everything learned, decided, and ruled out — appended chronologically as it
+happens. Treat as history; verify current state against the rig before acting.
 
 ## Objective
 - Recover the seed from the owner's own locked Trezor One (PIN lost, backup lost):
@@ -311,3 +310,66 @@ acting.
   DIFFERENT USB ports/controllers (lsusb buses 001-004) or a powered hub.
 - Hammer v3 live: ext 712-738 (178-184.5us full measured NACK window),
   reps 24-27, 40 samples/pt, reconnect/resume + backoff + watchdog.
+
+## Overnight post-mortem + gray zone v2 (2026-10-24)
+- Overnight: 5 passes, 10,800 shots at reps 24-27 - ALL nack, loop stopped
+  ~22:40 (session recycle). NOT a rig failure: idle-kill + TIO3-trigger kill
+  + clkgen/ADC verification all pass (clkgen honest at 4-100MHz; triggers
+  100% fired per ADC capture check).
+- **Root cause of all-nack: the direct wire moved the energy scale UP.**
+  Escalation at the decision window: reps 24-80 = NOTHING on the executing
+  core; **reps 100-800 = the real gray zone (dead + fc/fe corrupted NACKs)**.
+  Yesterday's reps-24-27 "gray zone" (9f1f/ff) was an artifact of the lossy
+  breadboard path's slow collapse edges.
+- **HAMMER v4 (running): reps 100/125/150/200/250/300, ext 712-738,
+  30 samples/pt** (~4900 shots/pass) in the verified live gray zone.
+- Targeting cross-checked vs articles (user): glitch window = after the
+  Read-Memory command pair lands, before the NACK - matches SECGlitcher's
+  check_RDP_and_get_addr() and Jerin Sunny. Our fc/fe corrupted NACKs prove
+  we're hitting it. BUT the two LA measurements disagree by up to ~14us
+  (first: NACK trigger+183us; jitter run: burst+178-184 = trigger+170-176)
+  => true window wider than assumed. **Hammer window widened to ext
+  700-750 (175-187.5us trigger-relative), applies from the next pass.**
+- Single-212ns-pulse sweep (rep 1, ext 700-750, 78 shots): ALL nack - the
+  executing core needs sustained conduction, not single taps. Complete
+  energy picture: singles/nothing; reps<100/nothing; reps 100-300/mostly
+  dead + occasional fc/fe; the jackpot lives in the narrow mixed band
+  (reps ~100-200) with the CW's coarse repeat knob.
+- **Recommendation: order width-stretcher parts** (width-stretcher-parts.md,
+  ~$10: 74HC123/LVC1G123 + logic FET + pot + caps) - clean single 100ns-2us
+  pulses, no repeat ambiguity. That is the precise knob this F205 demands.
+- HAMMER v5 (running): reps 100/125/150 (the mixed band), ext 700-750
+  (widened), 30 samples/pt. Passes ~1h (dead-heavy cadence).
+
+## PUBLISHED PARAMETERS FOUND (2026-10-24) - mkesenheimer Trezor One article
+- docs/archive/mkesenheimer-trezor-one-new-firmware.md (Oct 2025): our EXACT
+  chip + EXACT attack (RDP1->RDP0 via system bootloader readmem, VCAP node).
+  **Stage 2 success: delay 105.45-105.8us after the 0x11ee command start,
+  glitch length 10-30ns ("shorter is better, less invasive")**. In our
+  trigger reference (TIO3 = +8.5us into 0x11): ~97us from trigger = ext
+  1540-1580 @16MHz - a window NEVER swept before (all campaigns targeted
+  pair-end 175-190us). Their stage-1 (RDP2->RDP1 at boot) = ~180us after
+  VCAP rise - matches our glitch-1 numbers exactly (validates the family).
+- Campaign 14 (running): 16MHz, offset 0 (clean pulse), widths 30/40/49
+  (19/25/31ns - their class), ext 1540-1580, 40 samples/pt.
+- Campaign script now sweeps WIDTH lists (G_WIDTH=30,40,49).
+- Pico plan (user has one): findus/PicoGlitcher toolchain - MicroPython UF2
+  + pip findus + update-fw; needs a MOSFET (asked user for drawer check).
+  Pico Glitcher firmware pinout per findus/firmware/PicoGlitcher.py.
+
+## Pico Glitcher toolchain ALIVE (2026-10-24)
+- User's Raspberry Pi Pico: BOOTSEL-flashed MicroPython v1.29.0, then
+  findus 1.14.1 (own venv /home/tdaly/.findusenv) + update-fw --version v1.
+- **Upstream findus bug found+patched**: firmware/Globals.py defines
+  PADS_BANK0_BASE/ADC_BASE only for hw v2/v3 - v1 (bare Pico) firmware
+  crashes at init (FastADC.configure_adc). Patch: v1 gets the RP2040
+  constants (same silicon as v2). Patched in site-packages; consider
+  upstreaming.
+- Pico v1 pin map (firmware/Globals.py): TRIGGER=GP15, RESET=GP0,
+  GLITCH_EN=GP1, HP_GLITCH=GP16, LP_GLITCH=GP17, EXT_GLITCH=GP19,
+  VTARGET_EN=GP20, VTARGET_OC=GP21.
+- Plan: Blue Pill (user has) = dress-rehearsal target for the Pico rig
+  before porting to the F205 socket board. STILL NEED: a MOSFET for the
+  crowbar stage (no answer yet on drawer check).
+- Campaign 14 (CW, published mkesenheimer window ext 1540-1580 @16MHz,
+  19-31ns pulses) running in parallel.

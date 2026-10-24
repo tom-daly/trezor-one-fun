@@ -70,7 +70,7 @@ def artifacts_check():
     lines = []
     for name in ('storage.bin', 'known-answer.json', 'make_storage.py',
                  'decrypt_storage.py', 'uart_dump.py', 'glitch2_campaign.py',
-                 'set_rdp1.py', 'COMPACTION_NOTES.md'):
+                 'set_rdp1.py', 'FINDINGS.md'):
         p = os.path.join(HERE, name)
         lines.append(f'  {"OK " if os.path.exists(p) else "MISSING"} {name}')
     for pat in ('JACKPOT_*.bin', 'uart-dump*.bin'):

