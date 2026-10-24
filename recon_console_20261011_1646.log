@@ -1,0 +1,54 @@
+============================================================
+Phase-A recon: boot glitch + trace capture
+============================================================
+  trace capture OFF (scope MEASURE not wired) -> glitch+canary only
+  width=40 offset=-45 repeat=20
+  ext_offset 16500-19500 (165-195us) step 25
+  8 samples/pt  |  canary=0x08000000
+  log -> TRACES/recon_20261011_164612.csv
+============================================================
+    eo= 165.0us s0 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 165.0us s1 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 165.0us s2 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 165.0us s3 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 165.0us s4 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 165.0us s5 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 165.0us s6 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 165.0us s7 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 165.2us s0 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 165.2us s1 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 165.2us s2 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 165.2us s3 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 165.2us s4 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 165.2us s5 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 165.2us s6 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 165.2us s7 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 165.5us s0 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 165.5us s1 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 165.5us s2 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 165.5us s3 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 165.5us s4 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 165.5us s5 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 165.5us s6 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 165.5us s7 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 165.8us s0 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 165.8us s1 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 165.8us s2 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 165.8us s3 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 165.8us s4 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 165.8us s5 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 165.8us s6 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 165.8us s7 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 166.0us s0 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 166.0us s1 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 166.0us s2 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 166.0us s3 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 166.0us s4 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 166.0us s5 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 166.0us s6 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 166.0us s7 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 166.2us s0 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 166.2us s1 fail         StlinkException: AP fault at address: 0x08000000
+    eo= 166.2us s2 fail         StlinkException: AP fault at address: 0x08000000
+
+⚠ interrupt -> safe teardown (crowbar off, target unpowered)

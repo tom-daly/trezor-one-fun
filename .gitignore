@@ -1,0 +1,17 @@
+# Byte-compiled
+__pycache__/
+*.pyc
+# Dump/output artifacts
+*.bin
+*.hex
+*.dump
+*.npz
+# venv (lives separately at ~/.cwvenv)
+.venv/
+# Build artifacts
+*.o
+*.elf
+scripts/usb_reset
+# Local test fixture: seed + PIN for the planted rehearsal storage.
+# Regenerate locally with storage-sim/make_storage.py — never commit.
+storage-sim/known-answer.json

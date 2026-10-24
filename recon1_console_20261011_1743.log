@@ -1,0 +1,19 @@
+============================================================
+Glitch-1 campaign: boot glitch (SWD-enumerates = success)
+============================================================
+  trace capture OFF (scope MEASURE not wired) -> glitch+canary only
+  width=40 offset=-45 repeat=20
+  ext_offset 17000-18900 (170-189us) step 25
+  8 samples/pt  |  canary=0x08000000
+  log -> TRACES/recon_20261011_174301.csv
+============================================================
+
+  💥 SUCCESS  ext_offset=17000 (170.0us)  SP= RST=
+
+✅ Boot glitch landed: SWD re-enabled (RDP1 behaviour).
+   Flash extraction = glitch 2 over the UART bootloader (plan §2/§4).
+
+============================================================
+  WORKING ext_offset=17000 (170.0us)  SWD live, flash refused = RDP1 (expected)
+  trace + log dir: TRACES/   csv: TRACES/recon_20261011_174301.csv
+============================================================

@@ -1,0 +1,13 @@
+# STLink V2 - Allow full access to device and sysfs controls
+SUBSYSTEM=="usb", ATTR{idVendor}=="0483", ATTR{idProduct}=="3748", MODE="0666", GROUP="plugdev", TAG+="uaccess"
+
+# STLink V2.1
+SUBSYSTEM=="usb", ATTR{idVendor}=="0483", ATTR{idProduct}=="374b", MODE="0666", GROUP="plugdev", TAG+="uaccess"
+
+# STLink V3
+SUBSYSTEM=="usb", ATTR{idVendor}=="0483", ATTR{idProduct}=="3752", MODE="0666", GROUP="plugdev", TAG+="uaccess"
+
+# Allow access to sysfs authorized file for STLink devices
+ACTION=="add|change", SUBSYSTEM=="usb", ATTR{idVendor}=="0483", ATTR{idProduct}=="3748", RUN+="/bin/chmod 666 /sys$devpath/authorized"
+ACTION=="add|change", SUBSYSTEM=="usb", ATTR{idVendor}=="0483", ATTR{idProduct}=="374b", RUN+="/bin/chmod 666 /sys$devpath/authorized"
+ACTION=="add|change", SUBSYSTEM=="usb", ATTR{idVendor}=="0483", ATTR{idProduct}=="3752", RUN+="/bin/chmod 666 /sys$devpath/authorized"

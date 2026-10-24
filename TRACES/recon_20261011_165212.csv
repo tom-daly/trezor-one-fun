@@ -1,0 +1,7 @@
+ext_offset,timing_us,sample,result,note,sp,reset_vec
+16500,165.0,0,fail,StlinkException: AP fault at address: 0x08000000,,
+16500,165.0,1,fail,StlinkException: AP fault at address: 0x08000000,,
+16500,165.0,2,fail,StlinkException: AP fault at address: 0x08000000,,
+16500,165.0,3,fail,StlinkException: AP fault at address: 0x08000000,,
+16500,165.0,4,fail,StlinkException: AP fault at address: 0x08000000,,
+16500,165.0,5,fail,StlinkException: AP fault at address: 0x08000000,,

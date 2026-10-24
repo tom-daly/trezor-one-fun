@@ -1,0 +1,55 @@
+2026-10-11 16:51:42,048 - INFO - ============================================================
+2026-10-11 16:51:42,048 - INFO - ✅ Found ChipWhisperer!
+2026-10-11 16:51:42,048 - INFO - ============================================================
+2026-10-11 16:51:42,048 - INFO - 📋 Configuring glitch parameters...
+2026-10-11 16:51:42,064 - INFO -   Width: 40
+2026-10-11 16:51:42,065 - INFO -   Offset: -45
+2026-10-11 16:51:42,065 - INFO -   Ext_offset range: 17000 to 18900 (step: 1)
+2026-10-11 16:51:42,065 - INFO -   Trigger: tio4 (rising edge of reset)
+2026-10-11 16:51:42,069 - INFO - 🎯 Starting glitch campaign...
+2026-10-11 16:51:42,069 - INFO -   Sample size per setting: 8
+2026-10-11 16:51:42,070 - INFO -   Total settings to test: 1901
+2026-10-11 16:51:42,071 - INFO - ============================================================
+2026-10-11 16:51:42,071 - INFO - [AUDIO] Speaking: 'Starting glitch campaign'
+2026-10-11 16:51:43,808 - INFO - 
+⚡ Testing ext_offset: 17000 (Setting 1/1901) [0.0%]
+2026-10-11 16:51:43,809 - INFO -    └─ Width: 39.84375, Offset: -44.921875
+2026-10-11 16:51:43,809 - INFO - 
+   🔄 Attempt 1/8 | Ext_offset setting 1 | Total: 1
+2026-10-11 16:51:43,810 - INFO -       ├─ Glitch @ ext_offset: 17000 (170.0µs after reset)
+2026-10-11 16:51:43,810 - INFO -       ├─ Width: 39.84375 cycles, Offset: -44.921875
+2026-10-11 16:51:43,810 - INFO -       ├─ Repeat: 20 cycles
+2026-10-11 16:51:43,810 - INFO -       ├─ Rebooting target & arming scope...
+2026-10-11 16:51:43,815 - INFO -       ├─ Rebooting target & arming scope... ✓
+2026-10-11 16:51:43,815 - INFO -       ├─ Waiting 2s for target init...
+2026-10-11 16:51:45,815 - INFO -       ├─ Waiting 2s for target init... ✓
+2026-10-11 16:51:45,816 - INFO -       ├─ Resetting glitch transistors...
+2026-10-11 16:51:45,823 - INFO -       ├─ Resetting glitch transistors... ✓
+2026-10-11 16:51:45,823 - INFO -       └─ Checking SWD access...
+2026-10-11 16:51:46,663 - INFO -       └─ Checking SWD access... 💥 SUCCESS!
+2026-10-11 16:51:46,664 - INFO - 
+🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉
+2026-10-11 16:51:46,664 - INFO - 💥 SUCCESS! GLITCH WORKED!
+2026-10-11 16:51:46,665 - INFO -    Offset: -44.921875
+2026-10-11 16:51:46,665 - INFO -    Width: 39.84375
+2026-10-11 16:51:46,665 - INFO -    Ext_offset: 17000
+2026-10-11 16:51:46,666 - INFO -    SWD Version: ST-Link/V2 V2J29S7
+2026-10-11 16:51:46,666 - INFO -    Attempt: 1/8
+2026-10-11 16:51:46,666 - INFO -    Total attempts: 1
+2026-10-11 16:51:46,666 - INFO - 🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉
+2026-10-11 16:51:46,666 - INFO - [AUDIO] Speaking: 'Success! Glitch worked!'
+2026-10-11 16:51:48,634 - INFO - 
+   📊 Completed 8 attempts at ext_offset=17000 | Overall: 1/15208 [0.0%]
+2026-10-11 16:51:48,634 - INFO - ✨ CAMPAIGN SUCCESSFUL!
+2026-10-11 16:51:48,634 - INFO -    Successes: 1
+2026-10-11 16:51:48,634 - INFO -    Failures: 0
+2026-10-11 16:51:48,634 - INFO -    Success rate: 12.5%
+2026-10-11 16:51:48,635 - INFO -    Time elapsed: 0:00:06.563577
+2026-10-11 16:51:48,635 - INFO -    Settings: offset=-44.921875, width=39.84375, ext_offset=17000
+2026-10-11 16:51:48,635 - INFO - ============================================================
+2026-10-11 16:51:48,635 - INFO - 🏁 Glitch campaign complete!
+2026-10-11 16:51:48,635 - INFO -    Total attempts: 1
+2026-10-11 16:51:48,636 - INFO -    Total time: 0:00:06.564851
+2026-10-11 16:51:48,636 - INFO - ============================================================
+2026-10-11 16:51:48,636 - INFO - [AUDIO] Repeating: 'Campaign complete. Glitch successful.' until key press
+2026-10-11 16:51:51,989 - INFO - Alert stopped by user

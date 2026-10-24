@@ -1,0 +1,14 @@
+============================================================
+Bootloader-bypass glitch  ->  SRAM dump
+  ext_offset 17000..17002  width=40 offset=-45 repeat=20
+  probe SRAM 0x20000000, dump 131072 bytes on success
+  max attempts 80
+============================================================
+
+💥 SRAM READABLE after glitch @ ext_offset=17000 (attempt 1)
+   first 64 bytes: 00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+
+Dumping SRAM -> SRAM_20261011_172946/sram_0x20000000.bin
+✓ dumped 131072 bytes (131072 of SRAM) -> SRAM_20261011_172946/sram_0x20000000.bin
+  non-trivial bytes: 0/131072
+  ext_offset that worked: 17000
