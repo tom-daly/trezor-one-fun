@@ -1,13 +1,8 @@
 #!/bin/bash
-# Overnight glitch-2 hammer: rerun the proven gray-zone config until a
-# JACKPOT appears (or the loop is stopped). Each pass adds hundreds more
-# stochastic samples at the known-corruptible settings.
-#
-# Direct-wire gray zone (found 2026-10-24): reps 100-800 produce dead +
-# corrupted replies (fc/fe) at the decision window; reps <100 = nothing
-# (10,800 overnight shots proved the old reps 24-27 band is sub-threshold
-# through the direct wire - the old gray zone was a lossy-path artifact).
-# With NRST fast recovery this runs ~2 shots/s incl. resyncs.
+# Range-sweep hammer: glitch across the known-good window and log every
+# shot, looking for misbehavior (weird/dead/ACK). 16 MHz (62.5ns ext steps,
+# ~31ns pulses at width 40-49), band 105-106.5us + margin, multiple
+# strengths, looping passes. Auto-dump (JACKPOT_*.bin) on any ACK.
 set -u
 cd /home/tdaly/trezor-btc/storage-sim
 PASS=0
@@ -15,15 +10,29 @@ while true; do
     PASS=$((PASS+1))
     echo "=== pass $PASS  $(date +%H:%M:%S) ==="
     T0=$(date +%s)
-    G_CLKGEN=4e6 G_OFFSET=-45 G_WIDTH=40 G_REPEATS=100,125,150 \
-    G_EXT_MIN=700 G_EXT_MAX=750 G_STEP=1 G_SAMPLES=30 \
-    G_COOLDOWN=0.02 G_REST_EVERY=800 G_REST_S=10 \
-    /home/tdaly/.cwvenv/bin/python -u glitch2_campaign.py \
+    G_CLKGEN=16000000 G_OFFSET=-45 G_WIDTH=40,49 G_REPEATS=25,50,100 \
+    G_EXT_MIN=1520 G_EXT_MAX=1590 G_STEP=1 G_SAMPLES=3 \
+    G_COOLDOWN=0.15 G_REST_EVERY=800 G_REST_S=10 G_OUTPUT=enable_only \
+    G_TAG=r1 \
+    /home/tdaly/.cwvenv/bin/python -u rdp1_glitch_campaign_full_mem_dump.py \
         >> /tmp/opencode/hammer.log 2>&1
     if ls JACKPOT_*.bin >/dev/null 2>&1; then
         echo "=== JACKPOT ON PASS $PASS ==="
         ls -la JACKPOT_*.bin
         break
+    fi
+    # between-pass chip health check (known-good command verification)
+    echo "--- health check after pass $PASS ---"
+    if /home/tdaly/.cwvenv/bin/python -u chip_health.py 2>&1 | grep "HEALTH: GOOD"; then
+        :
+    else
+        echo "=== chip UNHEALTHY after pass $PASS - running total rig reset ==="
+        if /home/tdaly/.cwvenv/bin/python -u reset_rig.py 2>&1 | grep RESET; then
+            echo "=== rig recovered - continuing ==="
+        else
+            echo "=== reset ladder FAILED - stopping the loop (physical check needed) ==="
+            break
+        fi
     fi
     # rapid-fail backoff: a pass lasting <60s means the rig is unhealthy
     # (wedged FPGA / USB bounce) - wait instead of spin-crashing

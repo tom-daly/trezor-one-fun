@@ -15,3 +15,16 @@ scripts/usb_reset
 # Local test fixture: seed + PIN for the planted rehearsal storage.
 # Regenerate locally with storage-sim/make_storage.py — never commit.
 storage-sim/known-answer.json
+
+# Campaign shot logs & run dumps (timestamped, generated fresh every run)
+storage-sim/campaigns/
+storage-sim/dumps/
+*.log
+
+# Scope screenshots (timestamped BMP/PNG land in scope/)
+scope/*.bmp
+scope/*.png
+
+# Jerin-Sunny LA frame archive: 267 MB raw - keep contact sheet + webm only
+docs/archive/jerinsunny_memory_read_frames/frames_all/
+docs/archive/jerinsunny_memory_read_frames/frames_unique/

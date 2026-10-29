@@ -37,7 +37,7 @@ def usb_check():
 def campaign_check():
     lines = []
     try:
-        out = subprocess.run(['pgrep', '-af', 'glitch2_campaign'],
+        out = subprocess.run(['pgrep', '-af', 'rdp1_glitch_campaign'],
                              capture_output=True, text=True, timeout=10).stdout
     except Exception:
         out = ''
@@ -46,7 +46,7 @@ def campaign_check():
         lines.append('  no campaign running (rig idle - full status OK to run)')
         return lines, None
     lines.append(f'  campaign alive: pid {procs[0].split()[0]}')
-    csvs = sorted(glob.glob(os.path.join(HERE, 'glitch2_*.csv')),
+    csvs = sorted(glob.glob(os.path.join(HERE, 'campaigns', 'glitch2_*.csv')),
                   key=os.path.getmtime)
     if not csvs:
         lines.append('  WARNING: no CSV appearing')
@@ -69,7 +69,7 @@ def campaign_check():
 def artifacts_check():
     lines = []
     for name in ('storage.bin', 'known-answer.json', 'make_storage.py',
-                 'decrypt_storage.py', 'uart_dump.py', 'glitch2_campaign.py',
+                 'decrypt_storage.py', 'uart_dump.py', 'rdp1_glitch_campaign_full_mem_dump.py',
                  'set_rdp1.py', 'FINDINGS.md'):
         p = os.path.join(HERE, name)
         lines.append(f'  {"OK " if os.path.exists(p) else "MISSING"} {name}')
