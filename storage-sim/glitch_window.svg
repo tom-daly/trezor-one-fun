@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 400" font-family="-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+  <defs>
+    <linearGradient id="gGlitch" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#34d399"/>
+      <stop offset="1" stop-color="#059669"/>
+    </linearGradient>
+    <linearGradient id="gCmd" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#eff6ff"/>
+      <stop offset="1" stop-color="#bfdbfe"/>
+    </linearGradient>
+    <linearGradient id="gSweet" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#a7f3d0"/>
+      <stop offset="1" stop-color="#34d399"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="880" height="400" rx="14" fill="#ffffff"/>
+  <rect x="0.5" y="0.5" width="879" height="399" rx="14" fill="none" stroke="#e2e8f0"/>
+
+  <!-- title -->
+  <text x="40" y="46" font-size="25" font-weight="700" fill="#0f172a">Glitch application window</text>
+  <text x="40" y="72" font-size="14" fill="#64748b">STM32F2 · RDP1 Read Memory (<tspan font-family="monospace" fill="#334155">0x11 0xEE</tspan>) — where to fire the crowbar on VCAP</text>
+
+  <!-- timeline band y:150-225 ; us axis 177..190 -> x 70..810 (56.9 px/us) -->
+  <!-- command processing (left) -->
+  <rect x="70" y="150" width="171" height="75" fill="url(#gCmd)" stroke="#93c5fd" stroke-width="1"/>
+  <text x="156" y="182" font-size="12.5" fill="#1e3a8a" text-anchor="middle">command still</text>
+  <text x="156" y="199" font-size="12.5" fill="#1e3a8a" text-anchor="middle">processing</text>
+
+  <!-- GLITCH WINDOW us 180-186 -> x 241..582 -->
+  <rect x="241" y="150" width="341" height="75" fill="url(#gGlitch)" opacity="0.18"/>
+  <rect x="241" y="150" width="341" height="75" fill="none" stroke="#059669" stroke-width="2"/>
+  <!-- sweet spot where flips cluster: us 180.6-184.2 -> x 275..480 -->
+  <rect x="275" y="150" width="205" height="75" fill="url(#gSweet)" opacity="0.5"/>
+
+  <!-- bolt + label -->
+  <text x="411" y="140" font-size="19" text-anchor="middle">⚡</text>
+  <text x="411" y="174" font-size="16" font-weight="700" fill="#065f46" text-anchor="middle">FIRE HERE</text>
+  <text x="411" y="191" font-size="12" fill="#047857" text-anchor="middle">us 180–186 · flips bypass RDP1</text>
+
+  <!-- NACK marker us 188 -> x 696 -->
+  <line x1="696" y1="138" x2="696" y2="240" stroke="#ef4444" stroke-width="2" stroke-dasharray="5 4"/>
+  <rect x="640" y="150" width="170" height="75" fill="#fef2f2"/>
+  <rect x="640" y="150" width="170" height="75" fill="none" stroke="#fecaca"/>
+  <text x="725" y="182" font-size="12.5" fill="#b91c1c" text-anchor="middle">chip answers</text>
+  <text x="725" y="199" font-size="12.5" font-family="monospace" fill="#b91c1c" text-anchor="middle">NACK 0x1F</text>
+  <text x="725" y="214" font-size="11" fill="#dc2626" text-anchor="middle">(too late)</text>
+
+  <!-- flip data points (actual SUCCESS flips) -->
+  <!-- us 180.8 x287 r7, 181.8 x344 r6, 183.5 x440 r6, 184.0 x468 r6 -->
+  <g>
+    <circle cx="287" cy="211" r="6" fill="#065f46" stroke="#fff" stroke-width="1.5"/>
+    <circle cx="344" cy="211" r="6" fill="#065f46" stroke="#fff" stroke-width="1.5"/>
+    <circle cx="440" cy="211" r="6" fill="#065f46" stroke="#fff" stroke-width="1.5"/>
+    <circle cx="468" cy="211" r="6" fill="#065f46" stroke="#fff" stroke-width="1.5"/>
+  </g>
+
+  <!-- axis -->
+  <line x1="70" y1="240" x2="810" y2="240" stroke="#94a3b8" stroke-width="1.5"/>
+  <g font-size="12" fill="#475569" text-anchor="middle">
+    <line x1="127" y1="240" x2="127" y2="246" stroke="#94a3b8"/><text x="127" y="262">178</text>
+    <line x1="241" y1="240" x2="241" y2="246" stroke="#94a3b8"/><text x="241" y="262">180</text>
+    <line x1="355" y1="240" x2="355" y2="246" stroke="#94a3b8"/><text x="355" y="262">182</text>
+    <line x1="468" y1="240" x2="468" y2="246" stroke="#94a3b8"/><text x="468" y="262">184</text>
+    <line x1="582" y1="240" x2="582" y2="246" stroke="#94a3b8"/><text x="582" y="262">186</text>
+    <line x1="696" y1="240" x2="696" y2="246" stroke="#94a3b8"/><text x="696" y="262">188</text>
+    <line x1="810" y1="240" x2="810" y2="246" stroke="#94a3b8"/><text x="810" y="262">190</text>
+  </g>
+  <text x="440" y="288" font-size="13" fill="#334155" text-anchor="middle" font-weight="600">glitch timing — <tspan font-family="monospace">us = ext_offset ÷ clkgen</tspan>  (G_US_MIN/MAX)</text>
+
+  <!-- callouts -->
+  <g>
+    <rect x="40" y="315" width="250" height="60" rx="8" fill="#f0fdf4" stroke="#bbf7d0"/>
+    <text x="56" y="338" font-size="13" font-weight="700" fill="#166534">Strength</text>
+    <text x="56" y="358" font-size="12.5" fill="#15803d"><tspan font-family="monospace">rep 6–7</tspan> = 36–42 ns · hp+lp crowbar</text>
+
+    <rect x="305" y="315" width="275" height="60" rx="8" fill="#eff6ff" stroke="#bfdbfe"/>
+    <text x="321" y="338" font-size="13" font-weight="700" fill="#1e40af">Timing note</text>
+    <text x="321" y="358" font-size="12.5" fill="#1d4ed8">glitch lands +8.68 µs (1 bit) after the <tspan font-family="monospace">us</tspan> value</text>
+
+    <rect x="595" y="315" width="245" height="60" rx="8" fill="#fffbeb" stroke="#fde68a"/>
+    <text x="611" y="338" font-size="13" font-weight="700" fill="#92400e">● = observed flips</text>
+    <text x="611" y="358" font-size="12.5" fill="#b45309">4 SUCCESS reads, all oracle=MATCH</text>
+  </g>
+</svg>

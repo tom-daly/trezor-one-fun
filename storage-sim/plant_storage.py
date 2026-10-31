@@ -14,6 +14,7 @@ import time
 sys.path.insert(0, '/home/tdaly/trezor-btc/storage-sim')
 import chipwhisperer as cw  # noqa: E402
 from swd.stlink import Stlink  # noqa: E402
+from _practice_guard import require_practice_board  # noqa: E402
 
 FLASH = 0x40023C00
 KEYR, SR, CR = FLASH + 4, FLASH + 0xC, FLASH + 0x10
@@ -21,6 +22,7 @@ STORAGE = 0x08008000
 
 
 def main():
+    require_practice_board('plant_storage.py (programs flash)')
     data = open('/home/tdaly/trezor-btc/storage-sim/storage.bin', 'rb').read()
     if len(data) != 0x4000:
         sys.exit(f'storage.bin is {len(data)} B - expected 16384')

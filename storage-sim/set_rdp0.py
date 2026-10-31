@@ -22,6 +22,7 @@ sys.path.insert(0, '/home/tdaly/trezor-btc')
 from swd.stlink import Stlink          # noqa: E402
 import chipwhisperer as cw             # noqa: E402
 import serial                          # noqa: E402
+from _practice_guard import require_practice_board  # noqa: E402
 sys.path.insert(0, '/home/tdaly/trezor-btc/storage-sim')
 from serialfind import find_ftdi       # noqa: E402
 
@@ -102,6 +103,7 @@ def uart_mass_erase_in_session(ser):
 
 
 def main():
+    require_practice_board('set_rdp0.py (RDP1->RDP0 regression = MASS ERASE)')
     power_cycle()
     st = Stlink(swd_frequency=480000)
     cur = read_rdp(st)

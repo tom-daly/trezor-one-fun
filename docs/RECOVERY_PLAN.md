@@ -3,7 +3,63 @@
 > Legitimate self-recovery of the owner's own locked Trezor One (PIN lost, backup phrase misplaced). Not an attack on a third party's device.
 
 **Target:** own Trezor One (locked out, backup phrase lost) · **MCU:** STM32F205 · **Firmware:** 1.13.1
-**Last updated:** 2026-10-11 · **Blocked on:** glitch 2 — offset window + pulse width (see §2); shunt/scope recon still pending
+**Last updated:** 2026-10-31 · **Status:** glitch-2 (flash read) SOLVED in rehearsal; salt now via SWD-SRAM (no glitch); real-device execution pending (see §0)
+
+---
+
+## 0. STATUS UPDATE — 2026-10-30/31 (supersedes the 2026-10-11 plan in §1–§5 below)
+
+Two breakthroughs since this plan was written. The "two glitches, glitch-2 in
+progress / all-zeros" framing below is now **history** — keep it for the trail,
+but the current reality is:
+
+### Glitch 2 (flash Read Memory RDP-bypass) — ✅ SOLVED
+Proven end-to-end in **`storage-sim/`** on a planted rehearsal board: voltage-glitch
+the STM32 **system-bootloader Read Memory** (`0x11 0xEE`) RDP check → dump NORCOW
+storage → offline PIN brute-force → **recovered PIN `9434` + full mnemonic**
+(matches `known-answer.json`). Working params: clkgen **166.67 MHz**, **VCAP**
+crowbar (`glitch_hp`+`glitch_lp`), offset **−45**, **rep6–7** (36–42 ns),
+us-window **~180–186**, trigger on the `0x11` burst (TIO3), 256 B/read,
+reset-per-shot. The all-zeros problem of §2 was the old SWD/9600 path; the solved
+path is UART 115200 8E1 + crowbar on VCAP. **Current toolset = `storage-sim/`**
+(`rdp1_glitch_campaign_full_mem_dump.py`, `decrypt_storage.py`, `la/`,
+`set_rdp0/1.py`, `plant_storage.py`), **not** the old `scripts/` set.
+**`storage-sim/FINDINGS.md` is the live campaign log** (2000+ lines).
+
+### Hardware salt — ✅ SWD-read from SRAM at RDP1, NO GLITCH (validated 2026-10-31)
+§4-step-5 reads uid `0x1FFF7A10` + OTP `0x1FFF7860` as salt inputs via glitch.
+**That region refuses the glitched bootloader read at the address stage (and via
+SWD) — a dead end** (confirmed after ~52k shots). Replacement, validated end-to-end
+on the test chip:
+- RDP1 blocks flash via SWD but **SRAM is fully SWD read/writable** (proven: flash
+  `0x08000000` faults, SRAM `0x20000000` reads, at RDP byte `0x55`).
+- `hardware_salt` is a `.bss` static (`storage.c:153`, 32 B) = `SHA256(UID‖OTP3)`,
+  written at `storage_init` **before** PIN entry → resident regardless of lock.
+- From running firmware: **NRST + BOOT0-high → STM32 system bootloader (NRST
+  preserves SRAM; core off protected flash so SWD attaches) → SWD-read the salt's
+  `.bss` address.** Validated: a firmware-written `.bss` sentinel at `0x20000000`
+  survives NRST→bootloader and reads back at RDP1 while flash stays blocked.
+=> The salt comes from **SRAM over SWD**; only the **encrypted storage** still
+needs glitch-2. (This does NOT contradict §3's "SRAM is not the target" — that is
+about the recovery *keys/seed*, cached only post-unlock; the *salt* is a non-secret
+init value and is always resident. See the annotated §3 note.)
+
+### Still open for the REAL device (the roadmap)
+1. `hardware_salt`'s exact `.bss` address for the real 1.13.1 build — RE from
+   `storage-sim/trezor-1.13.1.bin` (812 SRAM literals; trace `storage_init` →
+   `sha256_Raw(salt,len,hardware_salt)`), or reproducible-build `.map`.
+   **Self-validating fallback:** dump all 128 KB SRAM, try `.bss`-region windows
+   through `decrypt_storage.py` — the salt that verifies the PVC is the right one.
+2. Validate against **real firmware** (not the 68-B stub) — needs the ~1 MB RGT6
+   chip (the 512 KB socket part can't hold 1.13.1).
+3. **Combined dry run** on one realistic board: run real fw (known PIN/seed) →
+   glitch-read storage **and** SWD-read salt → decrypt → recover. Never composed yet.
+4. Confirm the locked device's exact firmware version (gates #1 + whether this
+   salt scheme applies).
+5. **Real-device physical access** — BOOT0 high (schematic: pin 60 hard-GND, must
+   isolate), VCAP glitch pad, SWD, UART. The whole bootloader approach (glitch AND
+   SRAM-read) depends on BOOT0 access; only ever done on the socket rig.
+6. **Passphrase status** (§7 #1) — unchanged make-or-break; settle before the grind.
 
 ---
 
@@ -59,7 +115,7 @@ RDP1 is the *recoverable* case (level 2 would permanently kill SWD). Good.
 
 ## 3. What we ruled out / learned
 
-- **SRAM is not the target.** It reads all-`00` in the bootloader state because nothing is loaded; and per VoidStar, recent firmware **removed the recovery keys from RAM** — so SRAM won't hold the seed on 1.13.1 even if populated. (Confirmed on real firmware-run SRAM, 2026-10-11: only ~1.5 KB non-trivial — `.data`/`.bss` + a small stack, no strings, no secrets.)
+- **SRAM is not the target** *for the seed/keys* — **but it IS the source of the hardware_salt** (see §0, 2026-10-31). The claim here is still correct *about the recovery keys*: recent firmware removed the decrypted seed/DEK from RAM (cached only post-unlock), so a locked device's SRAM has no seed. It reads all-`00` in bootloader state because nothing is loaded. **However** the `hardware_salt` `.bss` static (= SHA256(UID‖OTP3)) is a non-secret init value written at `storage_init` and is always resident — the 2026-10-11 "~1.5 KB non-trivial, no secrets" dump *contained* those 32 salt bytes, unrecognized as entropy. → salt comes from SRAM over SWD at RDP1, no glitch (§0).
 - **SRAM signatures, decoded (2026-10-11):** all-zero = a booted image ran and cleared its RAM (firmware or bootloader startup zeroing .bss); **~98% random garbage with a mostly-1s byte histogram** (0xFF/0xDF/0x7F/0xF7… dominant) = **uninitialized power-up RAM — no code ran** on that boot path (observed with a floating BOOT0). Harmless, no data — but a useful state oracle: garbage SRAM ⇒ the last boot went nowhere (check BOOT0 wiring).
 - **BOOT pins, decoded from the v1.1 schematic (2026-10-11 evening):** **BOOT0 (pin 60) hardwired to GND, no resistor** (isolate first — lift/cut, then drive from CW TIO1); **BOOT1 (PB2, pin 28) has NO net — it floats** → with BOOT0 high the boot is a coin flip: bootloader or **boot-from-SRAM → hang** (the dead-GPIO/garbage-SRAM signature). **Tie BOOT1 low** for a defined bootloader entry. Also: **PA9 = R8→GND on the board (USB VBUS-sense net)** — PA9 reads LOW when undriven and idles HIGH in the *firmware* (VBUS pull-up) as well as the bootloader (USART1 TX) — **PA9-high is NOT a bootloader discriminator; use the screen** (on = firmware, off = bootloader) or a `0x7F`→ACK.
 - **The seed is in encrypted flash** (NORCOW storage, `0x08008000`), recoverable only via the glitch-during-read.

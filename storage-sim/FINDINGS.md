@@ -1480,3 +1480,826 @@ USBDEVFS_RESET unsticks wedged CW
 - Nightly config now: 175-192 driver @0.1us x3, 30nm-class random
   strength, reset-per-shot, all guards. VERIFIED: 15-shot test spread
   r3-r8.
+
+## FIRST COMMAND-STAGE ACKs EVER (night farm glitch2_20261029_012753)
+- 9504 shots, 173-192us x10, random 24-42nm, reset-per-shot, 01:27-05:05.
+  0 success. BUT: 11 ACK_NO_DATA events = chip sent 0x79 for the 0x11
+  Read-Memory command (first-stage RDP check BYPASSED), then refused the
+  address stage (1f1f x7, silence x4).
+- CLUSTER: 10/11 in 179.4-183.7us driver (physical ~188.6-193 = NACK#2
+  window per byte-by-byte model). Strengths: 36nm x7, 30nm x3, 42nm x1,
+  24nm x0. In-cluster rate 1/215 shots (vs 1/1416 historical flips).
+- Dead ladder: 24=0%, 30=0.46%, 36=2.25%, 42=1.69%. 20 weird ff/00
+  strays, 1 zombie, 0 ghosts, 0 banked.
+- NEW BOTTLENECK: address stage. NEXT: (a) re-farm 178-185us only,
+  25-30 samples/pt, strength 30-42; (b) driver mod: on ACK_NO_DATA,
+  immediately RETRY addr+count stage several times before resync (the
+  corrupted check state may persist briefly - spend the ACK).
+
+## STRATEGY RECONCILIATION + NIGHT5 (2026-10-29 10:30)
+- Cross-review (Claude): ACK_NO_DATA = "right place wrong depth" near-miss,
+  ONE refusal instant (no second gate), narrow the band, go LESS invasive
+  (Kesenheimer 10-30ns). AGREED: one-gate model (real 42nm flips completed
+  addr+count UNGLITCHED - data streamed); band narrowed to 179-184.
+- DISAGREED on strength direction, with our own data: 24nm nothing ever,
+  40nm 0/13500, 36nm near-misses only, 42nm = ALL 8 real flips (~1/1416).
+  Kesenheimer's 10-30ns was Pico Glitcher FETs - not comparable to CW
+  crowbar coupling. Our gradient: more depth -> state actually flips;
+  user's 45nm cap = exactly rep7 42nm quantum.
+- DISAMBIGUATOR ARMED: every ACK now logs pre=<hex> (r before addr stage).
+  Spurious-ACK/corrupted-NACK#2 model predicts '1f79'; genuine accept
+  predicts '7979'. Tonight's ACKs settle it.
+- NIGHT5 config: FIXED r7=42nm, 179.0-184.0us @0.1 x30 samples,
+  reset-per-shot, ACK-spend armed (5 raw addr retries + stage-2 re-glitch
+  random 280-500us into addr phase, G_STAGE2=1 default). Expect ~15k
+  shots -> if 42nm flip rate holds (~1/1416), ~10 full flips. Any flip:
+  oracle-checked, banked, chain-drain probed.
+
+## 2026-10-29 — collector bug: ghost read tore campaign down at 1/66 ("stuck")
+
+Symptom: run_20261029_102921 flipped on shot #13015 (ext=30266 / 181.6us,
+w5 r7=42nm -> SUCCESS), oracle flagged it a GHOST READ (storage_0000 came
+back all-FF erase pattern), logged "NOT banked, retrying chunk" — then the
+run printed CHUNK SECURED, [LATCHED+] drained (1/66), "collected 1/66", and
+stopped. Not a hang: main() returned and the process exited.
+
+Root cause — three cooperating defects in the SUCCESS/collector block:
+  A. chain_unglitched() drain path had NO oracle check, so it re-banked the
+     exact ghost all-FF read the main SUCCESS path had just refused.
+  B. chain_unglitched() returned `drained > 0`; caller treats True as FULL
+     COLLECTION -> assemble_and_report + teardown + return. Draining one
+     (ghost) chunk ended the whole campaign. Docstring claimed "True only on
+     FULL collection" — it did not.
+  C. GHOST READ branch had no skip: control fell through to the unconditional
+     CHUNK SECURED print and into chain_unglitched() on every ghost.
+
+Fix (this file, same session):
+  - chain_unglitched(): added the same practice-oracle guard as the main path
+    (reject + save .bad.bin + abandon latch on MISMATCH); returns True ONLY
+    when next_target() is None (genuine full collection), else False.
+  - GHOST READ now skips SECURED/chain/advance entirely; the chunk stays
+    outstanding and farming retries it. Periodic RESET_EVERY resync still runs.
+  - CHUNK SECURED print moved inside the non-ghost else (no more false SECURED).
+
+Rules this reinforces: every bank site (main AND latch-drain) must oracle-gate
+in practice; "drained > 0" != "collection complete". On a real chip with no
+ORACLE the guard is skipped as before — cross-read consistency is the
+real-device ghost filter (still TODO).
+
+## 2026-10-29 — all-FF is NOT a ghost, except for the header chunks
+
+Checked the planted practice image storage.bin (plant_storage.py target,
+0x08008000, 16384 B): it is 98.2% 0xFF. Only chunks 0,1,2 (first 768 B)
+hold real data (NRC2 magic + keys, 303 non-FF bytes total); chunks 3-63 are
+legitimately erased flash = all-FF by design.
+
+Implications for the ghost-read filter:
+  - "all-FF read == failed/ghost" is ONLY valid for a chunk that is supposed
+    to contain data (here: storage_0000/0001/0002). For 61 of 64 chunks all-FF
+    is the CORRECT content; the oracle returns MATCH and banks it rightly.
+  - The oracle correctly flagged shot #13015 because storage_0000 must start
+    4e524332 faffffff (NRC2..), not ffffffff. That check is header-specific,
+    not a blanket all-FF rule.
+  - Real-device filter (no oracle) must therefore NOT treat all-FF as ghost in
+    general. Distinguish a ghost only where data is expected (a magic/header
+    chunk). Cross-read consistency still holds: two latched reads agreeing is
+    trustworthy, and all-FF agreeing with all-FF is legitimately empty flash.
+
+Collector optimization: the entire payload of interest is ~768 B in chunks
+0-2 (+ uid/otp3). If the real storage mirrors this shape, prioritize chunks
+0-2 first and let the latch-drain mop up the erased remainder, instead of
+farming all 66 targets uniformly.
+
+## 2026-10-29 — night5 review + cross-read confirmation layer, alert, lazy dumps
+
+NIGHT5 (glitch2_20261029_102921_night5.csv): 13,015 shots, FIXED rep7=42ns
+(G_RND_REP off - every row repeat=7), us band 179.0-181.6, offset -45, w5.
+Verdicts: nack 12596, dead 373 (2.9%), weird 28, ACK_NO_DATA 15, SUCCESS 1,
+zombie 1, spam 1.
+  - ZERO real flips. The single SUCCESS (#13015, us 181.6) was the all-FF
+    GHOST the oracle caught, not data. Real-flip rate here = 0/13015, well
+    below the historic ~1/1416 at rep7.
+  - WINDOW CLIPPED LOW. Only 179.0-181.6us swept; NACK onset ~187us. The lone
+    SUCCESS and 7/16 "got-ACK" events (ACK_NO_DATA+SUCCESS) sit at us>=181.0 =
+    the top 0.6us edge. dead% climbs with us (2.0%@179 -> 4.4%@181.6); weird
+    00/ff truncations cluster LOW (179.1-179.7). All three point to the
+    sensitive zone being ABOVE 181.6. ACTION: shift window up, e.g.
+    G_US_MIN=181 G_US_MAX=187, keep rep7.
+  - Interesting glitch artifact shot#11797: pre=790b31000102112131446373829279
+    = the STM32 Get(0x00) reply (ACK, N=0x0b, V=3.1, cmd list 00 01 02 11 21
+    31 44 63 73 82 92, ACK). The glitch made the ROM mis-decode 0x11 as Get.
+    Command-decode corruption, not a data leak.
+
+STRENGTH LOGGING (user concern): per-shot `repeat` IS logged faithfully (set
+last before arm in attempt(); RND_REP rolls then logs the same var). But the
+CSV wasn't self-describing: `width` is a no-op in enable_only (strength =
+repeat there), there was no ns column, and stage-2 fires a separately-rolled
+s2_rep that only appeared in the note. FIX: CSV now has `rep_ns` (repeat/clkgen
+in ns) + `s2_rep` columns; us column trimmed to 1 decimal (XXX.X).
+
+CROSS-READ CONFIRMATION LAYER (new, the oracle-free judge for the real device):
+  - confirm_chunk() runs two judges on every recovered chunk. A=oracle (byte
+    compare vs storage.bin, practice-only, GATES in practice). B=cross-read:
+    read the same chunk CROSSREAD_N times (default 3) from the latched
+    session, CONFIRMED only if >=CROSSREAD_MIN (default 2) reads agree. GHOST
+    if reads disagree, UNCONFIRMED if the latch dropped before enough reads.
+  - all-FF is NOT special: an erased chunk reproduces all-FF and is CONFIRMED
+    correctly. The old header-specific oracle rule stays for practice.
+  - Gate: ORACLE present -> oracle gates (cross-read observed only). ORACLE
+    None (real device) -> cross-read gates. Both judges run on the latch-drain
+    path too (chain_unglitched now routes through confirm_chunk).
+  - A/B logger: per-event ab_log.csv + end-of-run ab_matrix.txt confusion
+    matrix (oracle truth x cross-read verdict). The gating number is FALSE
+    ACCEPTS = (oracle MISMATCH, cross-read CONFIRMED); must be 0 before
+    trusting cross-read on the real device. Tune CROSSREAD_N/_MIN against it.
+  - Tunables: G_CROSSREAD_N, G_CROSSREAD_MIN.
+
+SUCCESS ALERT: a flip now fires a non-blocking desktop alert (terminal bell +
+canberra 'complete' chime + spd-say spoken line), plus one on full collection.
+Disable with G_ALERT=0.
+
+LAZY DUMP DIR: dumps/run_.../ is no longer created at startup - ensure_dump_dir()
+makes it on the FIRST find (first flip candidate). An empty run leaves no
+folder; assemble_and_report prints "0/N - no dump dir (nothing found)".
+
+## 2026-10-29 — STAGE-2 OFF by default: one clean glitch dumps the whole read
+
+Decision (user): there should be no stage-2 glitch needed. G_STAGE2 default
+flipped 1 -> 0 in rdp1_glitch_campaign_full_mem_dump.py. Raw NON-glitch
+address retries (G_ADDR_RETRIES) stay - they just re-send the address bytes.
+
+Evidence - jerinsunny STM32 vglitch logic capture
+(docs/archive/jerinsunny_logic1_single_glitch_full_dump.png, from
+https://jerinsunny.github.io/stm32_vglitch/assets/images/logic1.png):
+  - D3 Glitch = ONE pulse, fired right after the 0x11 0xEE Read Memory
+    command. No second glitch anywhere.
+  - D2 Rx: the 0x79 where RDP-1 would answer 0x1F NACK is annotated
+    "RDP Bypassed". After that single flip the address phase ACKs, the
+    length phase (0xFF 0x00 = 256 B) ACKs, and flash streams back
+    ("Extracted Data": 00 00 01 20 25 07 00 08 AD 06 ...).
+  - Proves: once a CLEAN stage-1 clears RDP, protection is down for the whole
+    command - the address phase does NOT independently refuse.
+
+Re-interpretation of ACK_NO_DATA: command-ACK (0x79) then "addr stage refused:
+1f1f" is a DIRTY stage-1 - the pulse corrupted the command decode into
+emitting 0x79 without clearing the RDP state, so the address phase still sees
+protection and NACKs. A second glitch can't fix that. The fix is a cleaner
+stage-1 (timing/strength) so the single pulse clears RDP like jerinsunny's.
+
+TUNING OBJECTIVE going forward: convert ACK_NO_DATA near-misses into FULL
+bypasses by moving stage-1 (window up toward the 181-187us edge where the ACK
+events trend, strength at the rep where ACKs appear), NOT by adding a shot.
+This supersedes any earlier "spend the ACK with a stage-2 glitch" framing.
+
+## 2026-10-29 — stage-2 glitch REMOVED; Kesenheimer Main2 port + trigger-reference reconciliation
+
+STAGE-2 FULLY REMOVED (user directive): deleted STAGE2/S2_US_LO/S2_US_HI config,
+the attempt() stage-2 block, _last_s2, and the s2_rep CSV column. CSV schema now:
+shot,ext_offset,us,width,repeat,rep_ns,verdict,note. Raw NON-glitch address
+retries (G_ADDR_RETRIES) kept. Rationale: jerinsunny single-pulse capture + the
+single-glitch RDP-1 model - one clean stage-1 clears RDP for the whole read.
+
+KESENHEIMER REFERENCE (docs/archive/kesenheimer-stm32f2-bootloader-memread-
+crowbar.py): his Main=RDP2->RDP1 (power-glitch on Vcap rising, RDP-2 only);
+his Main2=RDP1->RDP0 (single UART-0x11-triggered glitch, loop, dump). Our
+campaign == a port of Main2; our RDP-1 device needs ONLY Main2. His proven
+stage-2 params: delay2 105-106us, length2 10-100ns, trigger uart pattern 0x11,
+dump 0x08000000 len 0x2000.
+
+TRIGGER-REFERENCE RECONCILIATION (why our ~181us window underperformed):
+  - Kesenheimer delay2 is measured from the UART 0x11 PATTERN MATCH (fires when
+    the 0x11 byte is fully received, ~90-95us after its start bit @115200 8E1).
+  - OUR ext_offset is from the TIO3 edge = the 0x11 START bit.
+  - So his 105us maps to ~90 + 105 = ~195-200us in OUR reference - NOT 105us.
+  - Independently, our own LA puts the RDP decision / NACK onset at ~187-195us
+    after 0x11 start. Both converge on ~190-200us.
+  - We were sweeping 173-192us = just BELOW the decision point. night5 ACK
+    events trending to the top edge (181+) corroborate: the sweet spot is
+    higher. ACK_NO_DATA = firing a hair early -> cosmetic command-ACK without
+    clearing RDP.
+
+ACTION: next run G_US_MIN=188 G_US_MAX=200 (TIO3 reference), rep5-7 (30-42ns,
+agrees with his 10-100ns + our depth finding), single glitch, reset per shot.
+Assumption to verify on the LA: exact 0x11-byte -> pattern-match offset (~90-95us).
+
+## 2026-10-29 — LIVE LA capture: exact RDP decision point + us calibration
+
+Captured live (fx2lafw @4MHz) while the campaign fired, one clean decoded burst
+(storage-sim/campaigns/la_live_20261029_1858.csv):
+  TX 0x11 @ T0, 0xEE @ T0+95.2us   (one 8E1 byte later - correct)
+  2-byte command ends            @ T0+191.0us
+  RX NACK 0x1F onset             @ T0+196.5us  (5.5us after command end)
+  D2 glitch-marker edge          @ T0+198.75us
+  => RDP decision/refusal lands ~191-196.5us after the 0x11 START.
+
+CALIBRATION (resolves the "us" vs 0x11 offset): the campaign heartbeat already
+knows glitch_time = t_us + 8.7us after 0x11. That +8.7 = ONE bit time (8.68us):
+the CW ext trigger fires on the FIRST RISING edge of 0x11 (start bit is a
+falling edge at T0; d0=1 rises 1 bit later). So:
+   glitch_after_0x11 = (0x11_start + 8.68) + ext_offset(=t_us)
+   to hit the decision window [191, 196.5]us  ->  t_us = [182.3, 187.8]
+   => TARGET CAMPAIGN us = 182-188  (G_US_MIN=182 G_US_MAX=188).
+
+This CORRECTS the earlier "G_US_MIN=188 G_US_MAX=200" note (that was treating
+the us column as ~0x11-relative; it is actually 8.68us earlier). Evidence it's
+right: night5 topped out at us 181.6 = glitch at ~190.3us = right at command-end,
+just BEFORE the decision -> only cosmetic ACK_NO_DATA/ghost. The current live run
+reaching us 192 = glitch ~200.7us = just PAST the NACK. The bullseye between them
+is us 182-188.
+
+TRIGGERING NOTE: a UART pattern trigger is NOT required - the 0x11 burst-start
+edge is deterministically tied to the command (fixed baud => fixed 196.5us to
+the decision), and CW trigger jitter (night5 sigma 0.64us) is far smaller than
+the 5.5us decision window. The timing was a CALIBRATION problem, not a trigger-
+capability problem. Kesenheimer's uart_trigger(0x11) is on an RP2040 Pico (PIO),
+which is only needed to run his exact findus stack - a full Raspberry Pi (Linux)
+cannot meet the sub-us/ns timing.
+
+## 2026-10-29 — FIRST FLIP at verified timing: ghost (all-FF), safeguards held; grind-loop fix
+
+cal182 rep6-7 grind, pass 1 shot #149 (us 182.3, rep6=36ns) -> SUCCESS = a
+NACK->ACK flip + completed Read Memory, but the read returned ALL-FF
+(ffffffff..x16) instead of the real storage_0000 (NRC2faffffff..).
+  - oracle=MISMATCH, crossread=UNCONFIRMED (n_read=1: the flip did NOT latch
+    the session, so no 2nd read to confirm). Correctly REJECTED, saved
+    storage_0000.bad.bin, NOT banked, grind continued. ab_log recorded it.
+  - The confirmation layer did exactly its job on the first live flip - the
+    OLD collector would have banked this all-FF as real and torn down at 1/66.
+
+SIGNIFICANCE:
+  - At the LA-verified window (glitch 191-197us after 0x11), the flip-to-ACK
+    came on shot #149 - far faster than the old ~1/1400. Strong sign the
+    optimal timing dramatically raised the NACK->ACK rate. (n=1, not proven.)
+  - rep6 (36ns) was enough to flip at the good timing - NOT rep7. Supports the
+    rep6-7 choice; the better timing lowers the energy needed.
+  - NEW FRONTIER = ghost->data: flips come back as all-FF (Kesenheimer's "flash
+    probably erased" / night5 #13015), not real data. Converting ACK-flips into
+    DATA-flips is the problem now, not getting an ACK.
+  - The UNCONFIRMED (single read, no latch) means we can't cross-read-confirm a
+    non-latching flip. A flip that LATCHES the session (unglitched 0x11 keeps
+    ACKing) is what lets chain_unglitched drain + cross-read confirm real data.
+
+GRIND-LOOP BUG FIXED: loop_us182-188_rep67.sh detected a flip by "new dump dir",
+but a ghost REJECT also creates the dump dir (ensure_dump_dir writes .bad.bin
+there). Fixed: stop only on a REAL banked chunk (a .bin that is NOT .bad.bin);
+grind now keeps running through ghost rejects. Ghost .bad.bin dirs are expected
+during the grind and are not a stop condition.
+
+OPEN QUESTIONS: why all-FF (glitch disrupting the data fetch vs mis-tuned
+read-phase energy)? Does any flip return real data or latch the session?
+Let the grind accumulate flips and watch the ghost-vs-real / latch ratio.
+
+## 2026-10-29 — higher-strength round (rep9-20) RULES OUT software-only fix; points at VCAP cap
+
+Context: SEC Consult (secglitcher) RDP1 READ_MEMORY dumps use ~230ns crowbar
+width (= rep38 at our clkgen) with decoupling caps STRIPPED. We get all-FF
+ghosts at rep6-7 (42ns). Tested the software lever: higher strength.
+
+Round: us 182-188, G_US_STEP=0.1 (17cyc, ~0.1us steps), rep9-20 randomized
+(G_RND_LO=48 G_RND_HI=120), 3 shots/step, 177 shots (glitch2_..._histr_step01).
+Result:
+  weird 67 (37.9%)  dead 58 (32.8%)  nack 52 (29.4%)  SUCCESS=0  real=0  ghost=0
+  non-nack rises monotonically with rep: rep9 33% -> rep20 76%
+  dead/weird spread EVENLY across all us 182-186 (no clean-flip zone)
+
+Interpretation: on the CAPPED board there is NO strength that yields a clean
+real-data flip.
+  - rep6-7 (short): clean NACK->ACK flips but all-FF GHOSTS (shallow/incomplete
+    dip -> cosmetic ACK + erase read).
+  - rep9-20 (long): NO clean flips - just weird (corrupted partial resp, e.g.
+    c000) and dead (over-driven, mushy chaotic collapse).
+This is the signature of the VCAP (2.2uF core-LDO) decoupling cap fighting the
+crowbar: it prevents the sharp-but-controlled rail collapse a real bypass needs.
+SEC's long pulse works because they stripped decoupling; on our capped board the
+same energy just makes chaos.
+
+CONCLUSION: software-only (strength) path is exhausted. NEXT = HARDWARE: pull /
+reduce the VCAP decoupling cap (the one on the ~1.2V node = our SMA injection
+node) so even a short pulse collapses the rail cleanly, then re-run rep6-7.
+Caveat: F2 LDO needs some VCAP capacitance to boot - if fully removing it stops
+0x7F->0x79 sync, use a smaller cap, not zero (SEC kept C23 for overshoot).
+
+Rig safety note (confirmed this session): 'dead' = recoverable software crash
+(brownout crash of the bootloader), NOT damage - crowbar pulls VCAP DOWN, never
+overvolts. Chip re-syncs every shot. Harm signal would be failure to re-sync
+after a full power cycle (not seen).
+
+## 2026-10-29 — TWO confounds found: scope damping the glitch node + window missing the lower half
+
+Via the Siglent (10.11.13.220, VXI-11) reachable directly - captured scope + cursors.
+
+1) SCOPE DAMPING (prime confound for the whole session's ghosts): CH1 was clipped
+   on the VCAP glitch node the ENTIRE session (~15-20pF + 1M load = acts like
+   extra decoupling right at the injection point). Per the rig rule, scope must
+   never be on the glitch node during firing. This likely explains the ghosts:
+   damped/shallow dip -> cosmetic ACK + erase-pattern read. ALL tonight's cap/
+   strength rounds are partly confounded by this. LA timing is NOT affected (LA is
+   on UART, off the glitch node). FIX: pull CH1 off VCAP.
+
+2) WINDOW MISSING THE LOWER HALF: scope cursor measurement (C1:CRVA HREL) at a
+   us-185 glitch read ΔX = 12.1us between the glitch and the TX (0x11 0xEE end).
+   So at us 185, glitch = command-end + 12.1us. With "4us before NACK",
+   NACK = command-end + 16.1us. Mapping (1 us of 'us' = 1us glitch time):
+     command-end ~= us 173 ; NACK ~= us 189. Decision window = us 173-189 (~16us).
+   Every prior sweep ran us 182-188 = only the UPPER ~6us of the window; the first
+   ~9us after command-end (us 173-182) was NEVER swept. The RDP check may live
+   there. (This also explains the user's "go back 9.5us further" - command-end is
+   ~9us below our old us-182 start.)
+   NOTE: this 16us command->NACK span (scope) is much wider than the earlier LA
+   estimate (~5.5us) - the scope/cursor direct measurement supersedes it.
+
+ACTION (running now): scope OFF, full window us 172-190, rep6-7 (cap off),
+G_US_STEP=0.1, G_SAMPLES=10 (~1800 shots). First time sweeping the whole
+decision window with no probe loading. If scope-damping was the ghost cause,
+flips here should start returning real NRC2.. data.
+
+## 2026-10-30 — overnight 10-pass full-window scope-off grind COMPLETE: works, but all-FF
+
+Config: us 172-190 (full command-end->NACK window), rep6-7 (36-42ns) pinned,
+scope OFF VCAP, VCAP cap off, G_US_STEP=0.1, G_SAMPLES=10. Finished all 10 passes.
+
+RESULT: 17,700 shots | nack 17286 | dead 341 (1.9%) | weird 46 | ACK_NO_DATA 22 |
+SUCCESS 4 -> ALL 4 were all-FF GHOSTS. REAL chunks banked: 0.
+  Flip locations: us 180.7, 180.8 (r7), 182.7, 185.1 (r6) - ALL in the UPPER
+  window (command-end +8..13us), NONE in the newly-covered lower window
+  (us 172-180). So the "missed lower window" did NOT yield - flips still cluster
+  at the same us~181-185 zone as every prior run, and remain ghosts.
+
+Adaptive strength result (earlier tonight): rep6-7 = 1.9-2.5% dead (sweet spot);
+rep7-8 = 31% dead, 0 flips (hard dead-cliff). rep6-7 is the ceiling for minimal
+dead. Pinned there for the 10 passes.
+
+CONCLUSION after exhausting every variable tonight (scope on/off, VCAP cap
+on/off, rep6-20, full decision window, 0.1us resolution, ~40k total shots):
+  - The GLITCH CHAIN WORKS end-to-end: it reliably flips NACK->ACK and COMPLETES
+    the Read Memory (ACK + 256 bytes) = the RDP bypass succeeds. The hard part
+    (bypassing RDP1 readout protection) is SOLVED and reproducible.
+  - Every successful read returns all-FF, in EVERY configuration. A completed
+    read through a working bypass returning all-FF is most consistent with the
+    FLASH BEING ERASED (board never planted / planting didn't take), OR a
+    deeper data-path protection that returns FF.
+  - LEADING HYPOTHESIS: this Waveshare board's flash at 0x08008000 is erased -
+    the "ghosts" are successful reads of empty flash. The oracle only flags
+    MISMATCH because it expects planted NRC2.. data that isn't physically there.
+
+NEXT (needs the user / hardware):
+  1. VERIFY the flash is actually planted: was plant_storage.py run successfully
+     on THIS board? If erased, the attack already works - need a planted board
+     or the real target to see real data.
+  2. If planted and still all-FF -> investigate data-path protection (the FF-on-
+     protected-read failure mode) vs the command-gate bypass.
+  3. Board note: target is a Waveshare multi-family STM32 board; F2 jumper set
+     for pin 31 (VCAP_1); scope must stay OFF VCAP during firing (it damps).
+
+## 2026-10-30 — CHAIN PROVEN on planted board + full-dump collector fixes
+
+MILESTONE: after set_rdp0 -> plant_storage -> uart_rdp0_test (board re-planted,
+NRC2 verified), re-armed RDP1 (set_rdp1, 0x55, Read Memory NACKs), and glitched:
+  shot #385, us 180.8, rep7 -> CHUNK SECURED storage_0000, oracle=MATCH,
+  bytes = 4e524332 faffffff 02003c00.. = the exact planted NRC2 data.
+=> RDP1 readout-protection bypass + real Read Memory recovery PROVEN end-to-end
+   on STM32F2 (DEV_ID 0x411, confirmed via DBGMCU_IDCODE; F2 has NO PCROP, so
+   the all-FF was never a PCROP/SPRMOD flip). The overnight all-FF was an
+   UNPLANTED (erased) board - the glitch chain was always working (even latched:
+   the 03:34 flip was cross-read CONFIRMED all-FF = reliable read of empty flash).
+
+FULL-DUMP COLLECTOR FIXES (needed to assemble all 66 chunks):
+  1. TARGETS reordered: storage_0000..0063 FIRST (all oracle-gated -> bankable by
+     a single flip), uid/otp3 LAST. Old order had uid 2nd -> collector stalled on
+     uid (oracle NA -> never banked). G_TARGETED slice updated to match.
+  2. confirm_chunk: for a chunk the oracle can't judge (uid/otp3 outside
+     storage.bin -> orv='NA'), fall back to CROSS-READ gating instead of the
+     oracle MATCH gate (which could never bank them). Storage chunks still
+     oracle-gated; uid/otp3 bank on a latched cross-read-CONFIRMED read.
+Full dump now: non-latching flips accumulate storage chunks; a latching flip
+drains all remaining incl uid/otp3 -> storage_dump.bin + uid.hex + otp3.hex.
+
+## 2026-10-30 ~11:40 — Targeted uid/otp3 grind: FLIP DROUGHT (partial-ACKs, no completions)
+
+Targeted run (resumed 5 storage head chunks from `dumps/accum`, hunting uid
+@0x1FFF7A10 + otp3 @0x1FFF7860) over sweep us 180–186, w5, rep6–7 (G_RND 33–45),
+reset-per-shot. ~1 h / **3081 shots**:
+- **0 full flips / SUCCESS** (expected ~3–8 at the historical ~1/400 in-band rate)
+- **92 dead (3.0%)** — healthy rep6–7 signature; crowbar firing + coupling, NOT
+  damped and NOT over-hot (rep8+ dead-cliff would be ~31%). Scope is OFF VCAP.
+- **12 ACK_NO_DATA partial-flips** (~1/257): command-stage NACK→ACK flipped
+  (`pre=79…`) but address/read stage re-refuses (`addr stage refused: 1f1f`).
+  Localized `us` of partials: **181.0, 181.1, 181.3×2, 181.7, 183.4** — i.e. the
+  live zone is **us ~181.0–181.8**. Dead shots heaviest at 181.4–181.8 too.
+
+**Interpretation:** the pulse is landing in the right window and perturbing the
+bootloader (flips the first response), but is **marginal** — it cannot hold the
+RDP bypass through the full Read Memory transaction (command→address→data), so
+every near-flip dies as ACK_NO_DATA instead of completing. This is a glitch
+*quality/strength* margin issue at the window edge, NOT a timing-placement miss
+(placement is correct — the action is squarely at us 181) and NOT damping
+(dead rate normal). Contrast: the earlier full-dump run completed flips + a
+latch readily with the same nominal params — suggests a small drift in
+coupling/strength since then.
+
+**uid/otp3 gating reminder:** both are outside storage.bin → oracle=NA → banked
+ONLY via the cross-read gate (CROSSREAD_N=3, MIN=2 agreeing), which needs a
+**latching** flip (unglitched 0x11 keeps ACKing so read_target_n gets its
+repeats). A one-shot flip → UNCONFIRMED → not banked. One latch drains BOTH
+uid+otp3 via chain_unglitched. So: need completions first, then a latch (~1/11
+of completions). Zero completions = no path to bank yet.
+
+**Next levers (in order of info/cost):**
+1. In-situ: dwell on us 181.0–182.0 and nudge strength up a notch (try rep6–8 /
+   widen width) to push the marginal partial-ACKs into completions — cheap, no
+   teardown. If still 0 completions in ~1–2 passes, it's not strength.
+2. Scope verify (pulse off VCAP only for the check shot): confirm pulse shape
+   matches the successful full-dump capture — resolves "is the pulse the same as
+   when it worked" (drift hypothesis).
+3. We already HAVE uid (SWD 3e00…) + otp3 (ff*32) for the offline decrypt; this
+   grind proves the real-device path (SWD blocked) — no urgency, so worth doing
+   the scope check properly rather than grinding blind.
+
+## 2026-10-30 ~13:12 — Step-1 fine sweep: one FULL pass, still 0 completions → step largely exonerated
+
+Reverted G_US_STEP 0.1 -> 0.006 (ext step 17 -> **step 1**, 0.006us granularity)
+on the targeted uid/otp3 grind — the one config delta from the earlier WORKING
+full-dump run. Hypothesis under test (user): step 17 was jumping over a <0.1us-
+wide completion sweet-spot.
+
+**Result after one complete fine pass (3600 shots, now into pass 2):**
+- **0 full completions / SUCCESS** — same as step-17.
+- 100 dead (~3.1%, healthy rep6-7), 30 ACK_NO_DATA partial-flips (~1/120),
+  partials still clustered at **us ~181** (180.3–181.8).
+- The step-1 pass visited EVERY ext in 30000–31000, i.e. all the sub-0.1us
+  points step-17 skipped. Hitting them changed nothing.
+
+**Interpretation:** the step hypothesis is **largely ruled out** — if a thin
+completion band existed between the step-17 points, the fine pass would have
+landed in it ~3x/ext. It didn't. Combined with the 3.2us spread of completed
+flips seen in the ORIGINAL working run (far wider than 0.1us), target jitter
+clearly dominates and 0.1us stepping was never the deal-breaker. The drought is
+a glitch **strength/quality (drift)** problem: pulse lands correctly at us 181
+and flips the command-stage NACK->ACK (partial-ACKs prove placement), but is too
+marginal to hold the RDP bypass through the full Read Memory transaction, so
+every near-flip dies as ACK_NO_DATA. Caveat: flip rate is stochastic; keeping
+the fine run going the rest of the day for confirmation, but the negative result
+after a full pass is strong.
+
+**Next (tomorrow / when attended):** scope-verify pulse shape vs the working-run
+capture (CH1 on VCAP for the verification shot ONLY, off during firing); if drift
+confirmed, nudge strength (rep/width) or reflow the CW SMA jack (suspected
+cracked — see siglent-scope skill note re ~1000:1 attenuation). uid+otp3 already
+in hand (SWD 3e00…, otp3 ff*32) for the offline decrypt — grind is real-device-
+path proof only, no urgency.
+
+## 2026-10-30 ~15:07 — LA session: comms healthy, NO timing drift, address-refusal seen on the wire
+
+New reusable LA toolset in `storage-sim/la/` (capture.sh / decode.sh / timing.py
++ README). fx2lafw Saleae Logic, passive UART tap, safe during firing.
+Channel map verified: **D0 = TX (host->chip), D1 = RX (chip->host)**, 115200 8E1.
+
+Captured while the step-1 targeted run fired (first target = uid @0x1FFF7A10):
+- **Comms healthy / command well-formed.** TX: `7F 11 EE`; RX: `79` (ACK to the
+  7F sync) then `1F 1F` (NACK to Read Memory — normal un-glitched RDP1). Rules
+  out any UART/wiring fault.
+- **Address-stage refusal caught ON THE WIRE.** TX showed `1F FF 7A 10 8A`
+  (= uid address 0x1FFF7A10 big-endian + XOR csum 0x8A) sent 4–5× with RX `1F`
+  each time — i.e. `complete_read()` + the ADDR_RETRIES loop sending the uid
+  address and the chip NACKing it. This is the ACK_NO_DATA failure made visible:
+  the command got past (an address is being sent at all) but the **address stage
+  for the uid/OTP region is refused**.
+- **NO timing drift.** 0x11-command -> NACK latency measured 196.5–198.5 µs on
+  the clean 2-byte command bursts (175–180 µs on the shorter sync exchanges),
+  dead on the ~196.5 µs calibration. So the RDP decision window has NOT moved;
+  our glitch us-window is still correctly placed. The drought is not a stale
+  window.
+
+**Where this leaves the diagnosis:** timing drift is OUT (NACK onset unchanged).
+The glitch yields command-stage "ACK" events but the address stage refuses —
+consistent with EITHER (a) dirty/false command-ACKs (glitch too marginal, bypass
+never truly held, so RDP still refuses the address) OR (b) the uid/OTP system-
+memory region being refused specifically. The LA cannot separate (a) from (b)
+(both read as address-NACK). The storage-flash test (point the collector at a
+flash chunk and see if completions resume) remains the decisive separator.
+Note we have NEVER glitch-read the uid/OTP region (morning latch only ever
+drained storage flash, stopped at chunk 0020), so (b) is a live possibility.
+
+## 2026-10-30 ~17:45 — Switch to loop_fulldump (step 1) to test the storage-flash vs OTP-region hypothesis
+
+Stopped the targeted step-1 run after ~15k shots / 0 completions (uid/otp3 first
+target, all ACK_NO_DATA address-refusals). Relaunching loop_fulldump.sh instead,
+with G_US_STEP set 0.1 -> 0.006 (ext step 1) so the ONLY changed variable vs the
+targeted run is the collector: full-dump resumes storage 0-20 from accum, so the
+**first target is storage_0021 (flash @0x08009500)**, not the uid/OTP region.
+
+This is the decisive (a)-vs-(b) separator from the 15:07 LA finding:
+- completions/latch RESUME on the flash read -> the drought was the uid/OTP
+  system-memory region being refused at the address stage (fundamental, reframes
+  uid/otp3 plan).
+- flash ALSO droughts -> not the address; hardware strength/drift (scope check).
+Config otherwise identical to the morning latch run (loop_fulldump, G_FULL=1,
+offset -45, width 5, rep6-7, clkgen 166.667, us 180-186, step 1).
+
+## 2026-10-30 ~17:47 — RESOLVED: the drought was the OTP/UID region, NOT hardware. Flash completes.
+
+The storage-flash test paid off immediately. loop_fulldump (step 1, first target
+storage_0022 @0x08009600 flash) produced a **SUCCESS at shot #244** (ext 30081 /
+us 180.5, rep6, oracle=MATCH) -> CHUNK SECURED storage_0022. Single non-latching
+flip (crossread=UNCONFIRMED, banked by oracle).
+
+Contrast that settles the day's question:
+- targeted run (first target = uid 0x1FFF7A10, OTP region): ~15,000 shots, 0 SUCCESS
+- full-dump run (first target = storage_0022, flash):        244 shots, 1 SUCCESS
+
+Identical binary, glitch params, step, rig. The ONLY difference is the target
+address. Therefore:
+- **Hardware is fine** — the rig bypasses RDP and completes a Read Memory on a
+  FLASH address readily. The earlier "drift/strength" hypothesis is WRONG (or at
+  most minor); the big effect was the address.
+- **The drought was the uid/OTP system-memory region (0x1FFF7A10 / 0x1FFF7860)**
+  being refused at the ADDRESS stage of Read Memory, even with the RDP command
+  gate glitched. The command `0x11 0xEE` is identical; the region is the problem.
+  (User's instinct re "a fundamental difference" / "it's not 0x11 0xEE" for OTP
+  was correct — not a different command, but that region is not served by Read
+  Memory the way flash is.)
+
+Implications:
+- For THIS decrypt: no blocker — uid came from SWD (3e00…), otp3 = ff*32.
+- For the REAL locked device (SWD blocked): reading uid/OTP via bootloader
+  Read Memory under RDP1 is NOT demonstrated and may not be possible via the
+  plain address stage. Open item: confirm whether 0x11 reads 0x1FFF7A10 at all
+  with RDP down (no-glitch Read Memory at RDP0, during a board re-prep), and
+  research the correct bootloader path for the OTP/UID region on STM32F2.
+- n=1 so far; watching for more flash completions to rule out a fluke.
+
+## 2026-10-30 ~18:05 — Campaign rewired: LATCH -> uid/otp3 PRIORITY grab (new default behavior)
+
+Implemented the user's strategy in rdp1_glitch_campaign_full_mem_dump.py:
+- Farming (single-shot glitching) now targets FLASH only (next_farm_target /
+  next_storage_target); uid/otp3 are LATCH-ONLY and never farmed with single
+  glitches (that was the drought). Once all flash is banked but uid/otp3 still
+  pending, it fishes on any flash range (re-reads one, no re-announce) purely to
+  provoke latches.
+- On ANY latch, chain_unglitched() now calls grab_extras_latched() FIRST:
+  probes uid then otp3 with latch_probe() (liveness-aware - sends unglitched
+  0x11 0xEE, checks the 0x79 command-ACK) so an OTP address-refusal is NOT
+  mistaken for a dropped latch. Three outcomes logged per extra:
+    * CONFIRMED -> banked ("secured under latch"), spoken alert;
+    * latched-but-address-REFUSED -> the decisive negative (region not served by
+      Read Memory under genuine bypass) - printed, not fatal;
+    * latch dropped (command NACK) -> stop.
+  THEN it drains remaining flash while the latch holds.
+- Completion requires the FULL set incl uid/otp3 (next_target() is None), so the
+  campaign is not "done" until a latch delivers uid/otp3.
+Compiles clean. Relaunched loop_fulldump (step 1) resumed 42/64 flash chunks,
+farming storage_0042, uid/otp3 pending. Prior run proved the rig latches
+frequently on flash at step 1 - so we should get a latch (and the uid/otp3
+verdict) soon.
+
+## 2026-10-30 ~18:40 — Strength bump: random rep 6/7/8 (G_RND_HI 45->48) to fight the clean-flip drought
+
+New campaign hit the drift zone: 1317 shots, 0 clean completions (P~1% at the
+old 1/293 rate), 12 dirty ACK_NO_DATA - pulse landing (~3% disturbance) but
+consistently dirty, not clean. Per the plan, nudging strength UP.
+- enable_only crowbar: WIDTH is INERT (rep is the only strength knob), so left
+  G_WIDTH=5. (User asked for width 5/6; declined - no glitch effect in
+  enable_only + width changes trigger risky FPGA partial-reconfig.)
+- G_RND_HI 45 -> 48 => random pull now rep 6,7,8 (was 6,7). rep8 = 48ns.
+  Reintroduces rep8 which an earlier finding called a dead-cliff (~31% dead) -
+  but that was at different coupling; now the glitch is too WEAK (dirty flips),
+  so the hope is rep8 pushes marginal dirties over to clean. Random mix keeps
+  the proven 6/7 so it's a hedge. Watch the dead rate: if it spikes toward 30%
+  with still 0 clean, back rep8 out.
+
+## 2026-10-30 ~18:48 — rep8 backed out; random pull now rep 5/6/7 (G_RND_LO=28 G_RND_HI=45)
+
+rep8 (48ns) too hot (dead-cliff, user call). Reset random pull to rep 5,6,7:
+G_RND_LO 33->28 (28ns ceils to rep5; note 30ns rounds up to rep6 at 166.67MHz
+so 28 is needed to actually include rep5), G_RND_HI 48->45 (rep7 ceiling).
+rep5=30ns is historically the weak end (earlier: <=30ns gave no flips) so this
+leans weaker than the 6/7 sweet spot - watching whether clean flips return.
+
+## 2026-10-30 ~21:30 — ANALYSIS: where clean glitches land (all today's ~51.8k shots)
+
+Aggregated every SUCCESS/ACK_NO_DATA across all campaigns/*.csv from 2026-10-30.
+Totals: 50140 nack, 1416 dead (2.7%), 128 ACK_NO_DATA (dirty), 18 SUCCESS (clean).
+
+CLEAN-FLIP DISTRIBUTION (the actionable result):
+- by us (0.5us bins): peak at us 181.0 (8 of 18); 12 of 18 clean flips fall in
+  **us 180.5-181.2**. Sparse singles out to 185.
+- by rep: **rep6 (36ns) = 14/18 (78%)**, rep7 = 4/18. rep6 dominates clean flips.
+- DIRTY (ACK_NO_DATA) peaks at us 181.5 - i.e. JUST PAST the clean peak. Above
+  ~us 181.3 flips increasingly go dirty (command ACK, read refused) instead of
+  clean. The clean->dirty boundary is ~us 181.2-181.5.
+- clean-flip rate: ~1/730 shots INSIDE us 180.5-181.2, vs ~1/2900 across the
+  full 180-186 sweep (~4x dilution). We waste ~80% of shots above the sweet spot.
+- the 2 latches ever (storage_0003 @184.0, storage_0024 @181.7) were both rep6.
+
+DRIFT PATTERN (separate, from the proven rerun): clean flips cluster in the
+first ~1h after a fresh start then dry up (8 flips 19:00-20:23, then 0 in the
+next ~2700 shots/1h). Same marginal-glitch/thermal drift seen all day.
+
+ACTIONABLE for next run: narrow sweep to us ~180.4-181.4 and FIX rep=6 (drop
+randomization) to concentrate fire in the clean zone -> several-fold more clean
+flips/hour -> more latch chances. Consider periodic fresh rig cycle to counter
+the ~1h drift. Hardware: suspected cracked CW SMA jack reflow is the root-cause
+candidate for the marginal/ drifting pulse.
+
+## 2026-10-30 ~23:10 — STRATEGY: read hardware_salt from SRAM (.bss) instead of the refusing OTP region (user idea, source-verified)
+
+Instead of glitch-reading uid(0x1FFF7A10)+otp3(0x1FFF7860) - the region whose
+ADDRESS STAGE keeps refusing - read the firmware's precomputed hardware_salt
+straight out of SRAM. Verified against reference/storage_storage.c:
+- line 153: `CONFIDENTIAL static uint8_t hardware_salt[HARDWARE_SALT_SIZE]={0};`
+  -> file-scope static => lives in .bss (SRAM), persists whole firmware runtime.
+- HARDWARE_SALT_SIZE = SHA256_DIGEST_LENGTH = 32 (line 100).
+- storage_init line 804: `sha256_Raw(salt, salt_len, hardware_salt)` => the
+  static holds the FINAL SHA256(UID||OTP3) salt, ready-made.
+- reused (lines 542,599), never scrubbed.
+=> ONE 32-byte SRAM read replaces reading UID+OTP3 AND the offline SHA256, and
+   targets SRAM (0x20000000) which the bootloader reads normally (NOT the
+   refusing OTP/system block). Once latched, SRAM should COMPLETE where OTP
+   REFUSES - makes the latch productive.
+
+Attack: boot real firmware to PIN screen (storage_init has run -> salt in SRAM),
+then NRST (NOT power-cycle) with BOOT0 high -> system bootloader with SRAM
+preserved (NRST doesn't clear SRAM on F2), glitch-latch, read the known .bss
+address of hardware_salt.
+
+OPEN / TO VERIFY before trusting (priority):
+1. Does the ROM bootloader overwrite that .bss address before we read? Needs an
+   empirical SRAM-SURVIVAL TEST (write known pattern across SRAM from a test fw,
+   NRST->bootloader, glitch-read back, see which addresses survive). BIGGEST risk.
+2. Still need a latch (RDP gates at command stage regardless of address) - but it
+   becomes PRODUCTIVE (SRAM completes vs OTP refuses).
+3. NRST-to-bootloader from clean firmware (SRAM-preserving) must work on this rig
+   - we've only ever used power-cycle+BOOT0 (which CLEARS SRAM). Test it.
+4. Need hardware_salt's exact .bss address from the 1.13.1 .map/.elf (deterministic
+   per build).
+5. Cannot rehearse on the current 512KB F205 practice board (real 1.13.1 needs
+   ~1MB). Validate the MECHANISM with a stand-in fw that stashes a known 32-byte
+   marker in .bss; real-device for the real salt.
+
+## 2026-10-30 ~23:30 — *** BREAKTHROUGH: SRAM is readable via SWD at RDP1 (no glitch needed for the salt) ***
+
+PROVEN on this chip. Clean SWD attach at RDP1 (power-cycle BOOT0-high into
+bootloader so core runs ROM not protected flash; free CW handle; then Stlink):
+  RDP byte = 0x55 (L1), DEV_ID 0x411 (F2) confirmed.
+  SRAM 0x20000000 = 0x7FFEEF3D   READ OK
+  SRAM 0x20000100 = 0xAFFED63E   READ OK
+  SRAM 0x20010000 = 0x00000000   READ OK
+  FLASH 0x08000000 : BLOCKED/FAULT
+  FLASH 0x08008000 : BLOCKED/FAULT
+  UID   0x1FFF7A10 : BLOCKED/FAULT
+=> RDP1 protects FLASH and the 0x1FFF system/UID region, but SRAM is wide open
+   over plain SWD. (Explains why the glitched-bootloader uid/otp3 read refused at
+   the address stage - that region is genuinely protected both ways; SRAM isn't.)
+
+IMPACT: the hardware_salt (SRAM .bss static, = SHA256(UID||OTP3), see 23:10 entry)
+is extractable with NO glitch, NO latch, NO grind. The entire uid/otp3 glitch
+problem is MOOT - we were glitching to reach a hard-protected region when the
+derived salt we actually need sits in unprotected SRAM.
+
+SIMPLIFIED REAL-DEVICE ATTACK:
+  1. firmware boots to PIN screen -> storage_init -> salt in SRAM .bss
+  2. NRST + BOOT0-high into bootloader (NRST preserves SRAM; core off protected
+     flash so SWD attaches at RDP1)
+  3. SWD-read 32 bytes at hardware_salt's .bss address -> the salt
+  4. encrypted storage (flash chunks 0-2) still via the PROVEN flash glitch-read.
+Attach recipe that works at RDP1: fresh cw.scope(), tio1=True (BOOT0 high),
+target_pwr off 1.5s / on 2.5s, s.dis()+del+gc, THEN Stlink(swd_frequency=480000).
+
+STILL TO PROVE (test chip enables it): does the firmware .bss salt SURVIVE the
+NRST-into-bootloader (ROM bootloader SRAM usage), and at what address? Validate:
+RDP0 -> flash stand-in fw writing a known 32B marker to a .bss static -> RDP1 ->
+boot -> NRST+BOOT0 bootloader -> SWD-read marker. Low SRAM already shows non-zero
+leftovers in bootloader mode (0x7FFEEF3D) so wholesale-zeroing is NOT happening -
+promising, but test the specific .bss region.
+
+## 2026-10-31 ~00:00 — *** VALIDATED END-TO-END: no-glitch salt extraction via SRAM at RDP1 ***
+
+Built a 68-byte stand-in firmware (storage-sim/sram_test/: stub.c, link.ld) whose
+Reset_Handler writes a recognizable 32B sentinel (0xA0..0xBF) into a .bss static
+`fake_salt` @ 0x20000000 - mimicking storage.c hardware_salt[32]. Flashed at RDP0
+(st-flash, verified). Then:
+
+STEP A (firmware plants it): boot BOOT0-low -> SWD read 0x20000000 = a0a1..bebf. OK.
+STEP B (survival, confound-proof): one CW session - boot fw (BOOT0 low, power
+  cycle) then NRST (tio4 low->high_z) with BOOT0 high, POWER CONTINUOUS. UART
+  0x7F->0x79 = TRUE (confirms we're in the system bootloader, not a firmware
+  re-run). SWD read 0x20000000 = a0a1..bebf INTACT. => sentinel SURVIVED
+  firmware->NRST->bootloader at low SRAM. (tested RDP0; survival is RDP-indep.)
+STEP C (capstone @ RDP1): set_rdp1 (byte 0x55), repeat B. Result:
+  RDP=0x55, in bootloader=True, FLASH 0x08000000 BLOCKED, SRAM 0x20000000 =
+  a0a1..bebf. *** FULL CHAIN VALIDATED ***.
+
+PROVEN FACTS (this rig/chip):
+- NRST (tio4 pulse) + BOOT0 high (tio1) from CLEAN running firmware ENTERS the
+  system bootloader (contrary to the old "NRST doesn't work out of lockup" note -
+  that was from a glitch-lockup; from clean fw it works), and PRESERVES SRAM (no
+  power cycle).
+- RDP1 blocks flash via SWD but SRAM is fully SWD read/writable.
+- A firmware .bss value at 0x20000000 (low SRAM) is NOT clobbered by the ROM
+  bootloader on NRST entry -> survives to be read.
+
+REAL-DEVICE RECIPE (salt, no glitch):
+  1. device runs firmware to PIN screen -> storage_init -> hardware_salt in .bss
+  2. NRST + BOOT0-high -> system bootloader (SRAM preserved)
+  3. SWD attach (RDP1 ok; flash blocked, SRAM open), read 32B at hardware_salt's
+     .bss address -> the salt
+  + encrypted storage (flash) still via the PROVEN flash glitch-read.
+TODO real device: get hardware_salt's exact .bss address for the real fw build
+(1.13.1 .map/.elf); layout is deterministic per build. Our stub's was 0x20000000
+only because it's a trivial image - real fw address differs, must be looked up.
+
+=> The entire uid/otp3 glitch grind (all of 2026-10-30) is MOOT for the salt.
+
+## 2026-10-31 ~00:15 — Finding hardware_salt's .bss address: starting points (NEXT SESSION)
+
+Goal: the exact SRAM address of storage.c hardware_salt[32] for the real fw build,
+to read the salt from an SRAM dump. NOT a blocker - self-validating fallback:
+dump all 128KB SRAM at RDP1 via SWD, run .bss-region 32B windows through
+decrypt_storage.py brute-force; the salt that verifies the PVC is the right one.
+
+trezor-1.13.1.bin structure (we have this file):
+- legacy TRZF header @ offset 0; codelen ~0x0007B104 (504580B); 512B header, then
+  code. Image stripped. Firmware (Trezor One) loads at 0x08010000.
+- SHA-256 K-const 0x428a2f98 (LE 98 2f 8a 42) at file offsets 15736, 371694,
+  450812, 451480 -> the sha256 transform / K-table is near offset 15736.
+- 812 distinct SRAM-range literals (0x2000xxxx) across the image, 3056 refs.
+  hardware_salt is ONE of them.
+RE path to pin it:
+  1. find sha256_Raw (near the K-table @~15736) and its callers.
+  2. find storage_init's call sha256_Raw(salt, salt_len, hardware_salt) - the
+     3rd arg literal (LDR Rn,=0x2000XXXX) is hardware_salt's address.
+  3. cross-check vs the get_salt sites: memcpy(salt+salt_len, hardware_salt, 32).
+Cleaner alt: reproducible-build legacy/v1.13.1 (full trezor-firmware repo +
+pinned Docker toolchain) -> nm/.map gives the address directly. Confirm the
+locked device actually runs 1.13.1 first (version reportable; storage version
+in the (0,4) entry of the flash dump).
+
+## 2026-10-31 ~01:xx — Glitch-2 characterization hammer resumed (practice chip, freshly re-planted)
+
+Back on the stand-in (real device deferred - not ready). Re-planted storage:
+set_rdp0 (3 passes to clear the erase-drops-DP quirk this time) -> plant_storage
+(readback==storage.bin PASS) -> set_rdp1 (0x55). All via the now practice-guarded
+scripts (G_PRACTICE_BOARD=YES). Board: RDP1, storage.bin @0x08008000, head blank.
+
+Hammer = loop_fulldump.sh, FULL window to re-confirm ranges/strength:
+  us 180-186 (ext 30000-31000), step 1 (0.006us), random rep 5/6/7, offset -45,
+  G_FULL=1, reset-per-shot, fresh accum (storage_0000 first).
+Goal: run continuously, accumulate the SUCCESS/ACK_NO_DATA/dead distribution by
+us+rep to re-confirm the clean-flip sweet spot (expected ~us 180.5-181.2, rep6
+from the 2026-10-30 analysis of ~52k shots). Live window + heartbeat + monitor up.
+
+## 2026-10-31 ~14:00 — Clean-flip CAPABILITY COLLAPSED (hardware); LA rules out comms/chip/timing
+
+After the overnight run's first ~6900 shots (7 flips), clean flips stopped and did
+NOT recover across ANY approach: burst+cooldown (5310 shots, 0 clean), continuous
+NRST (1883 shots, 0 clean) = ~22k shots, 0 clean flips. Glitch still LANDS the whole
+time (dead ~3.4%, dirty ACK_NO_DATA ~1/190) - it perturbs but can't reach a clean
+bypass. Power-cycle-damping hypothesis DISPROVEN: continuous NRST (no power cycle)
+is equally dry.
+
+LA check (storage-sim/la, passive on UART, during firing) isolates it:
+- TX: 11 EE 7F ... command sent correctly.
+- RX: 1F 1F / 79 - chip ALIVE, NACKs the read (correct RDP1), ACKs the sync.
+- command->NACK latency median 194us vs 196.5us calibration = NO timing drift,
+  window still correctly placed.
+=> comms, chip responsiveness, and timing all VERIFIED GOOD. The only unverified
+element is the VCAP pulse itself (LA can't see the ~36ns pulse). So the fault is
+isolated to GLITCH DELIVERY: pulse amplitude dropped below the clean-bypass
+threshold - a HARDWARE degradation, not software/config.
+Suspects: (1) CW crowbar FET thermal (CW fired continuously >1 day, target
+power-cycled but CW itself NEVER rested), (2) cracked CW SMA jack worsening,
+(3) a loosened connection.
+
+ACTION: cold-cycle the whole CW (unplug/cool/replug - the one reset never done),
+then a quick glitch test - clean flip returns => FET-thermal; still dry => inspect/
+reflow the SMA jack. Scripts stopped; CW stopped re-opening via software (consistent
+with needing the cold-cycle). Practice chip RDP1 + storage planted (accum 10/64);
+real device untouched.
+
+## 2026-10-31 — Chip orientation test for an UNMARKED QFP64 (no dimple), power-OFF
+
+Pinout refs (STM32F205 LQFP64): VDD = pins 1,19,32,48,64 (pin 1 = VBAT);
+VSS = pins 12,18,63. (See docs/F205_LQFP64_PINOUT.md.) Reversed = instant kill
+on power-up, so ALWAYS verify before energizing (rd_alive.py / any power).
+
+Physical markers to check first: chamfered 45deg corner = pin-1 corner; faint
+laser dot under angled light/loupe; text orientation (weak hint).
+
+METHOD 2 - DMM diode mode, find the ground group (CHIP OUT OF SOCKET):
+  - VSS pins 12/18/63 are internally bonded -> read continuity (~0 ohm) to each
+    other, and every I/O pin shows ~0.5-0.7 V to them (RED on I/O, BLACK on VSS).
+  - VDD pins 1/19/32/48/64 also mutually connected; diode conducts the OTHER way
+    (BLACK on I/O, RED on VDD group). 5 VDD vs 3 VSS pins distinguishes them.
+  - Map the VSS trio + one VDD pin to the pinout -> pin 1 (VBAT) is the first pin
+    of the VDD side next to the corner -> orientation fixed. Seat to match socket.
+  *** This test only works OUT OF SOCKET. *** In-socket it is CONFOUNDED: the
+  board's GND net already ties socket positions 12/18/63 together regardless of
+  the chip, so mutual continuity there proves nothing about orientation.
+
+IN-SOCKET test (power OFF) - rail short check:
+  - Measure 3V3 rail <-> GND rail. Correct orientation = normal chip impedance
+    (kOhm-ish / decoupling caps charging). Reversed = a VDD pin on the GND net
+    (or vice versa) => abnormal near-short or a diode drop between the rails.
+    Any near-short/diode between 3V3 and GND => STOP, do not power.
+Only after orientation is confirmed: rd_alive.py (powers chip, reads VCAP~1.2V /
+VDD~3.3V on the scope = ALIVE; at RDP2 SWD/bootloader are dead = expected).

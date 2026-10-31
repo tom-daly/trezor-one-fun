@@ -4,10 +4,74 @@ Synthetic Trezor-legacy storage with a **known seed and PIN**, flashed to the
 clean F205 at `0x08008000` — a fully verifiable rehearsal target for the
 dump → offline-decrypt pipeline before the locked device's real dump.
 
+## Glitch attack — RDP1 bypass, PROVEN end-to-end (2026-10-30)
+
+Voltage-glitch the STM32F2 system-bootloader Read Memory RDP check, dump the
+storage, decrypt offline. Verified on the planted rehearsal board:
+**PIN `9434` + the full mnemonic were recovered from glitch-dumped memory**
+(brute-force 9,435 candidates, 56 s; matches `known-answer.json`).
+Chain: glitch RDP1 → Read Memory → NORCOW head → offline PIN brute-force →
+decrypt → PIN + seed.
+
+**You only need ~5 targets, not the full 16 KB.** All secrets (EDEK/PVC at
+(0,2) + the encrypted mnemonic at (1,2)) live in the NORCOW head = storage
+chunks 0–2; chunks 3–63 are blank (0xFF) free space. The campaign therefore
+**defaults to targeted**: `storage_0000..0004 + uid + otp3` (7 reads).
+`G_FULL=1` dumps the whole 16 KB (mostly blank, for a complete image);
+`G_TARGETED_N` sets how many head chunks.
+
+### Rig / attack parameters (verified this chip)
+- Chip **STM32F2xx** (DEV_ID `0x411` via `DBGMCU_IDCODE`) — RDP + WRP only,
+  **no PCROP/SPRMOD** (so a glitched read never returns a masked pattern; FF =
+  genuinely erased flash).
+- CW-Lite crowbar (`glitch_hp`+`glitch_lp`) on **VCAP** (1.2 V core rail);
+  trigger = TIO3 edge on the `0x11 0xEE` burst; `clkgen 166.67 MHz`.
+- **Timing window `us 180–186`** (= `ext/clkgen`), i.e. the pulse landing
+  ~189–195 µs after the `0x11` start — straddling the RDP decision (command-end
+  ≈ us 173, NACK ≈ us 189). The `us` column sits **+8.68 µs (one bit)** behind
+  the actual glitch (CW triggers on the first *rising* edge).
+- **Strength `rep6–7` (36–42 ns)** = sweet spot (~2 % dead). `rep8+` is a hard
+  dead-cliff (31 % dead, no flips). Sweep step `G_US_STEP=0.1`.
+- **The scope MUST be OFF the VCAP node while firing** — a probe there
+  (~15–20 pF) damps the glitch (acts like extra decoupling). The LA on the UART
+  TX/RX lines is harmless (slow digital, not the glitch node).
+- A **latching flip** (unglitched `0x11` keeps ACKing) drains every remaining
+  chunk in one burst via `chain_unglitched`. In-band flip rate ≈ 1/400; a flip
+  latches ≈ 1/11.
+- **Confirmation layer:** oracle (vs `storage.bin`) gates storage chunks;
+  cross-read (N consistent latched reads) gates uid/otp3 and is the real-device
+  judge. A ghost/erase read can never be banked as real.
+
+### Workflow (prep a known-planted RDP1 board, then glitch)
+```sh
+PY=/home/tdaly/.cwvenv/bin/python
+$PY set_rdp0.py        # RDP1->RDP0 downgrade + mass-erase (needs a power-cycle re-read mid-way)
+$PY plant_storage.py   # SWD-program storage.bin @ 0x08008000
+$PY uart_rdp0_test.py  # verify: Read Memory ACKs @ RDP0, NRC2 canary intact
+$PY set_rdp1.py        # re-arm RDP1 (0x55) -> Read Memory NACKs again
+# glitch-dump (TARGETED by default: storage head + uid + otp3):
+G_CLKGEN=166666667 G_OFFSET=-45 G_WIDTH=5 G_US_MIN=180 G_US_MAX=186 \
+  G_US_STEP=0.1 G_RND_LO=33 G_RND_HI=45 \
+  $PY -u rdp1_glitch_campaign_full_mem_dump.py       # + G_FULL=1 for the whole 16 KB
+# offline recovery from the glitch-dumped chunks:
+$PY decrypt_storage.py storage_from_glitch.bin --brute 0000-9999 --uid <12B-uid-hex>
+```
+Real locked device: same chain; the UID is glitched out too (SWD blocked at
+RDP1), and `otp3` comes from the OTP read. See `FINDINGS.md` for the full
+campaign history and calibration data.
+
 ## Files
 
 | File | Purpose |
 |---|---|
+| `rdp1_glitch_campaign_full_mem_dump.py` | **The glitch campaign**: voltage-glitch RDP1 Read Memory → dump storage head (+uid/otp3). Targeted by default; `G_FULL=1` for all 16 KB. Env-var config in its header |
+| `set_rdp0.py` / `set_rdp1.py` | Downgrade RDP1→RDP0 (+mass-erase) / re-arm RDP1 (0x55) over SWD — prep the rehearsal board |
+| `plant_storage.py` | SWD-program `storage.bin` into flash @ `0x08008000` (region must be erased) |
+| `uart_rdp0_test.py` | Verify a planted board at RDP0: Read Memory ACKs, NRC2 canary intact |
+| `full_recover.py` | End-to-end: dump storage+uid+otp3 → brute PIN → decrypt → PIN+mnemonic (self-checks `known-answer.json`) |
+| `loop_fulldump.sh` | Full-dump runner: multi-pass + crash-safe `dumps/accum/` resume, assembles `storage_dump.bin` at 64/64 |
+| `la/` | LA toolset (fx2lafw UART tap): `capture.sh` / `decode.sh` / `timing.py` — sanity-check comms and measure `0x11`→NACK latency without touching the glitch node (safe during firing). D0=TX, D1=RX, 115200 8E1 |
+| `FINDINGS.md` | Golden-bible campaign log: every calibration, confound, and result (read before new experiments) |
 | `make_storage.py` | Generator: PIN + mnemonic + UID/OTP → norcow sector image + `known-answer.json` |
 | `decrypt_storage.py` | Offline decryptor: parse image, PIN check (known or brute-force), mnemonic recovery |
 | `uart_dump.py` | Bootloader UART dry run: sync → GET-ID → Read Memory (the no-glitch rehearsal of glitch-2's dump) |

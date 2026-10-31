@@ -11,6 +11,7 @@ import sys
 import time
 
 from swd.stlink import Stlink
+from _practice_guard import require_practice_board
 
 FLASH = 0x40023C00
 KEYR, OPTKEYR, SR, CR, OPTCR = (FLASH + 4, FLASH + 8, FLASH + 0xC,
@@ -20,6 +21,7 @@ RDP_L1 = 0x55          # any value != 0xAA (L0) and != 0xCC (L2)
 
 
 def main():
+    require_practice_board('set_rdp1.py (writes option bytes)')
     st = Stlink(swd_frequency=480000)
     cur = st.get_mem32(OPTCR)
     print(f'OPTCR before : 0x{cur:08X}  (RDP byte 0x{(cur >> 8) & 0xFF:02X})')

