@@ -4104,3 +4104,156 @@ ORDER (updated - crowbar path verified healthy 11-01, so feed is next):
   2) Re-run r4-r7 depth ladder (scope off node during firing) vs 11-01
      captures - compare ringdown shape/repeatability.
   3) Shallow-band flip sweep (r4/r5 + width-shaped partial dips) with feed in.
+
+## 2026-11-03 — FULL END-TO-END RECOVERY on chip-c (glitch storage + .bss salt)
+Complete chain proven on the faithful RDP1 clone (random/locked OTP, resident
+salt-firmware, planted storage):
+- glitch-2 dumped storage chunks 0,1,2 (oracle=MATCH): storage_0000 ext=30259
+  (181.6us) rep6, storage_0001 ext=30315 (181.9us) rep7, storage_0002 ext=30119
+  (180.7us) rep7. Resume (G_RESUME) worked across runs. Scope OFF the node =
+  clean flips at ~1/700-800.
+- salt from firmware .bss in SRAM dump (chips/chip-c/sram_*.bin @ 0x20000000) =
+  c03bb669...e875794c = SHA256(UID||OTP) (real-device route; OTP random+locked,
+  unreadable).
+- offline: assembled 3 glitched chunks + salt -> decrypt_storage -> PIN <redacted>,
+  24-word mnemonic "<redacted>" = EXACT match to known-answer.json.
+Recovery needs chunks 0-2 only (0=EDEK/PVC->PIN; mnemonic 0102 tail straddles
+into chunk 2). 2 chunks gave PIN but 0102 TAG MISMATCH (tail in FF-pad); chunk 2
+completed it. Script updated: G_EXTRA=0 (skip uncrackable uid/otp3),
+G_STORAGE_BASE/LEN/SECTOR_LEN (default both NORCOW sectors 0x08008000+0x0800C000,
+head-of-each-sector in targeted mode) for the real 32KB/2-sector storage; chip-c
+uses G_STORAGE_LEN=0x4000. 1MB vs 512KB does NOT affect pulls (fixed addresses).
+
+## 2026-11-03 (end of session) — RESUME POINT
+Stopped for the night. Rig left SAFE: crowbar disarmed (glitch_hp/lp off), TIOs
+high_z, target_pwr OFF.
+STATE:
+- chip-c = faithful RDP1 clone, FULLY CRACKED end-to-end today: glitch-2 dumped
+  storage chunks 0-2, .bss salt from SRAM, decrypt -> PIN <redacted> + 24-word
+  mnemonic (matches known-answer). See RDP1_TO_DUMP.md for the full story.
+- Banked chunks: dumps/run_20261103_012612 (0,1) + dumps/run_20261103_015300 (2).
+- Script upgrades today (all tested): investigate_chip G_OPENOCD, plant_storage
+  OTP-provision rewrite, generate_bss, validate_auto_bss, set_rdp1, wipe_chip,
+  erase_storage; campaign: G_EXTRA (skip uid/otp3), G_STORAGE_BASE/LEN/SECTOR_LEN
+  (both NORCOW sectors default), G_ORACLE.
+NEXT (tomorrow):
+- The "new lean run" (G_TARGETED_N=3 G_EXTRA=0 G_STORAGE_LEN=0x4000) was launched
+  then stopped before completing - re-run to confirm the trimmed campaign banks
+  0-2 cleanly with zero wasted shots, then re-verify recovery from fresh chunks.
+- Optional: cosmetic - the collector startup print still hardcodes
+  "(16 KB storage + uid + otp3)"; update to reflect actual target count.
+- Real-device plan unchanged: G_STORAGE_LEN=0x8000 (both sectors), salt from the
+  device's own .bss; mechanism identical.
+
+## 2026-11-03  chip-2 (real Trezor part) identified + investigate_chip device-firmware boot
+- New part **chip-2**, pulled from a real Trezor. Installed in the rig and ID'd
+  read-only with investigate_chip.py.
+- **RDP LEVEL 1** (OPTCR 0x0FFFFFED, RDP byte 0xFF). Triple-agreement:
+  pyswd + independent OpenOCD cross-check + flash/storage/OTP/UID all blocked.
+  Debug port is ALIVE (DAP IDCODE 0x2BA01477, SRAM readable) -> definitively
+  NOT RDP2 (L2 would fuse SWD dead; we'd get no IDCODE). User expected L2; the
+  part is L1 -- either an RDP2 set never committed or it was only ever L1.
+  (L1 is the good outcome: the whole glitch->SWD recovery path needs L1.)
+- Boots its **resident Trezor firmware** from main flash: PC=0x08005C4A (in the
+  Trezor bootloader region, below norcow storage @0x08008000), SP=0x2001FBA8.
+  Core shows LOCKUP = RDP1 debug-halt artifact, not a boot failure.
+- **investigate_chip.py upgraded**: now ACTIVELY DRIVES the device-firmware boot
+  config (TIO1/BOOT0=gpio_low, TIO2/BOOT1=gpio_low) set before target_pwr so it
+  latches at the power-on reset -- no longer trusts a jumper/pulldown. G_DRIVE_BOOT0=1
+  still overrides to BOOT0-high for the ST system bootloader. Verdict now keys off
+  the driven boot pins + PC region (main flash => DEVICE FIRMWARE; system ROM while
+  BOOT0 low => BOOT0 stuck high at pin), replacing the stale SP-pattern heuristic
+  that mislabeled a device-firmware boot as "LIKELY IN THE BOOTLOADER".
+- POSTURE: chip-2 is a real-device part. Practice-board guard (G_PRACTICE_BOARD=YES)
+  and no chip-modifying scripts apply. Open question: is chip-2 seed-bearing (recover)
+  or a donor/spare (realistic practice target)?
+
+## 2026-11-03  chip-2 H3/FPB first attempt -> blocked by missing VCAP hold-up
+- Ran h3_fpb_attack.py on chip-2 (real seed part, RDP1), real-device mode
+  (G_ORACLE unset, G_OUT=chips/chip-2/storage_fpb_0_2.bin). Result: stage1-done
+  NOT SET, scratch came back CLEAN-ZERO (0/192 still-sentinel). I.e. staged SRAM
+  code did not survive to run; real Trezor firmware then zeroed SRAM on flash boot.
+- Diagnosed with h3_primitives.py:
+    P-WRITE  = 9/9 OK (SRAM staging over SWD works fine)
+    P-REMAN  = 0.00% retention at EVERY off-duration 1..500 ms.
+  => the 1.2V core rail collapses instantly: NO VCAP hold-up capacitance present.
+     SRAM remanence is the make-or-break primitive for H3; with no VCAP caps it
+     is impossible. (chip-c had the caps on -> <=50ms window -> attack worked.)
+- FIX (user): install VCAP caps on pin 31 (VCAP_1) + pin 47 (VCAP_2), ~2.2uF each.
+- RIG MODE NOTE: H3/FPB wants VCAPs ON (hold rail -> remanence, glitchless).
+  The glitch-2 campaign wanted VCAPs OFF (crowbar must pull pin 31). Opposite
+  requirements; H3 needs no crowbar so no conflict. Set caps per the attack in use.
+- NEXT: with VCAPs on, re-run h3_primitives.py P-REMAN to find chip-2's retention
+  window, pick OFF_MS inside it, then re-run h3_fpb_attack.py.
+- h3_fpb_attack.py made real-device-safe this session: G_ORACLE optional (unset =>
+  judge success by stage2-done + scratch-filled, ALWAYS save), G_OUT sets dump path.
+
+## 2026-11-03  chip-2 remanence: CAPS WORK; h3_primitives P-REMAN is confounded on real firmware
+- CORRECTION to the "0% retention" entry above: that reading was a measurement
+  artifact, NOT a remanence failure. h3_primitives repowers with BOOT0 LOW ->
+  real Trezor firmware boots and memset-zeroes SRAM before readback, so it reads
+  0% no matter how well the rail holds. (Tells: 0% even at 1ms, caps-on==caps-off
+  identical, and CLEAN ZEROS rather than random bit-rot = software memset.)
+  -> the P-REMAN test is INVALID on any chip running real RAM-clearing firmware.
+- TRUE remanence (scratchpad reman_bootloader.py: repower into ST SYSTEM
+  BOOTLOADER, BOOT0=1/BOOT1=0, ROM that does NOT wipe SRAM, read back over SWD):
+      1,2,5,10,20,50 ms off -> 100% retention (8/8)
+      100 ms off            -> 0% (random 0xaae967d7 = genuine analog decay)
+  => VCAP caps ARE holding the 1.2V core rail. Remanence window ~ up to 50ms,
+     gone by 100ms. FPB attack OFF_MS=30 is safely inside it.
+- Therefore the chip-2 FPB failure (stage1-done NOT SET, clean-zero scratch) is
+  NOT remanence. Clean zeros there = the step-3 flash-boot ran real firmware and
+  wiped SRAM, which only happens if stage1 never programmed the FPB. Prime
+  suspect: SRAM-boot (BOOT0=1,BOOT1=1) not engaging -> BOOT1/PB2(pin28) not
+  reaching HIGH at the pin, so it lands in the bootloader and stage1 never runs.
+  NEXT: h3_sramboot_test (does SRAM-booted code execute on chip-2?).
+
+## 2026-11-03  chip-2 FPB chain: fault localized to redirect/vector-catch
+- h3_sramboot_test on chip-2: ALIVE marker SET (0x1aa1aa1a) => SRAM-boot ENGAGES
+  and runs our code (BOOT0=1/BOOT1=1 works; BOOT1/PB2 reaches the pin fine).
+  DONE marker NOT set, scratch 64/64 still-sentinel => SRAM-booted code CANNOT
+  read flash at RDP1 (faults), exactly as Obermaier found on F1. This is WHY the
+  FPB boot-from-flash trick is needed; not a bug.
+- fpb_survives_nrst (scratchpad): programmed FPB over SWD, pulsed NRST (TIO4 low
+  50ms, power held), reconnected: FP_CTRL=0x261 ENABLE=1, FP_COMP0=0x1 enabled,
+  FP_REMAP=0x20000100, remap table [0]=0x20010000 [1]=0x20001001 ALL INTACT.
+  => FPB config SURVIVES NRST on chip-2. FP_CTRL reset value 0x260 => NUM_CODE=6
+  comparators present. The "NRST preserves FPB" premise HOLDS.
+- So the chip-2 FPB failure is NOT: remanence (caps good to 50ms), NOT SRAM-boot
+  (runs our code), NOT FPB-survives-NRST (intact). Remaining unknowns: (a) does
+  SRAM-booted stage1 actually ARM the FPB from code (vs debugger), and (b) does
+  the remapped reset-vector fetch get caught so stage2 runs in flash-boot context.
+  NEXT: instrument - SRAM-boot stage1, reconnect, read S1_DONE + FP_CTRL/COMP to
+  confirm code-armed FPB. (Reconnect re-locks flash, so this checks arming only.)
+
+## 2026-11-03 — FW SOURCE CHECK: does 1.13.1 wipe SRAM + where OTP/UID/salt live (real device)
+Vendored tree trezor-firmware-legacy-v1.13.1 (no full RAM wipe exists):
+- legacy/firmware/setup.c:117 - the ONLY explicit RAM clear is the USB OTG
+  peripheral RAM (memset_reg 0x50020000-0x50020500). No full-SRAM scramble
+  anywhere; standard C-runtime .bss zero-fill at reset is all.
+- RAW entropy slot is deliberately wiped: legacy/firmware/trezor.c:129-147
+  collect_hw_entropy(true) fills HW_ENTROPY_DATA[44] with UID(12B) + OTP block3
+  (32B); legacy/firmware/config.c:389-390 passes it into storage_init(...) then
+  memzero(HW_ENTROPY_DATA) immediately after -> raw OTP3 window in SRAM is
+  transient (micro-seconds-tenths of a second after main()).
+- BUT the DERIVED salt never dies: storage/lib storage.c:153
+  `static uint8_t hardware_salt[32]`; storage.c:804 in storage_init()
+  `sha256_Raw(salt, salt_len, hardware_salt)`; grep for memzero(hardware_salt)
+  = ZERO hits. hardware_salt therefore persists in SRAM for the WHOLE firmware
+  session until power-off. (Upstream leaves it in RAM while zeroing the raw
+  entropy - the CONFIDENTIAL annotation is cosmetic.)
+- Unprivileged edge: trezor.c:176-178 collect(false) would fill HW_ENTROPY
+  with 0x3C junk; normal real-device boot is privileged -> collect(true)=2real.
+CONSEQUENCE for the real-device chain:
+  Raw OTP/UID direct glue: need NOT. The salt decrypt_storage.py needs is
+  hardware_salt = sha256(UID||OTP3) - and its 32B copy sits permanently in
+  firmware .bss/SRAM. So: glitch-1 (RDP2->RDP1) -> SWD SRAM readable -> dump
+  SRAM -> read hardware_salt at its static .bss address (find offset once by
+  disassembling the glitch-dumped firmware binary: sha256_Raw store target).
+  Optional value of raw OTP3: it is the cross-check for the SRAM candidate
+  (salt == sha256(UID||OTP3)); raw values recoverable by pointing the glitch-2
+  readmem farm at 0x1FFF7A10 (UID) / 0x1FFF7860 (OTP3) after landing at RDP1 -
+  never yet exercised on chip-a/c, one driver change.
+  SECONDARY fallback target: the transient HW_ENTROPY_DATA raw-44B window
+  (main() -> first storage_init) could in principle be caught by a boot-time
+  SWD attach, but persistence of hardware_salt makes it unnecessary.
