@@ -25,6 +25,24 @@ storage-sim/dumps/
 scope/*.bmp
 scope/*.png
 
+# LA captures (.sr = big timestamped binary session artifacts)
+*.sr
+
+# Vendored firmware source tree: public, pinned at tag legacy/v1.13.1,
+# re-downloadable from trezor upstream. 67 MB / 4k files - never commit.
+trezor-firmware-legacy-v1.13.1/
+
+# Per-chip workspaces (chip-a/chip-c): practice fixtures + generated artifacts.
+# Seeds/PINs live ONLY in the gitignored known-answer.json; keep README/notes.
+storage-sim/chips/*/known-answer.json
+storage-sim/chips/*/archive/
+storage-sim/chips/*/campaigns/
+storage-sim/chips/*/dumps/
+storage-sim/chips/*/opencode_logs/
+storage-sim/chips/*/scope_captures/
+storage-sim/chips/*/SRAM_*/
+storage-sim/chips/*/la_captures/
+
 # Jerin-Sunny LA frame archive: 267 MB raw - keep contact sheet + webm only
 docs/archive/jerinsunny_memory_read_frames/frames_all/
 docs/archive/jerinsunny_memory_read_frames/frames_unique/

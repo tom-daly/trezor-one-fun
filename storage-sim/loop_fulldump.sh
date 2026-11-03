@@ -1,4 +1,10 @@
 #!/bin/bash
+# === BACKUP: PROVEN morning-latch config (2026-10-30). The params that
+# got the latch at 09:49 and this afternoon's flash completions:
+#   step 1 (G_US_STEP=0.006) + random pull rep 6/7 (G_RND_LO=33 G_RND_HI=45)
+#   offset -45, width 5, us 180-186, G_FULL=1, latch->uid/otp3-first binary.
+# Restore with:  cp loop_fulldump.morning_proven.sh loop_fulldump.sh
+# === do not edit; this is the reference baseline ===
 # Full 16KB storage dump, robust across process restarts. A persistent ACCUM
 # dir gathers every banked (non-bad) chunk; each run resumes from ACCUM (so no
 # progress is ever lost) and its new banks are merged back. Stops when all 64
@@ -22,8 +28,8 @@ while true; do
     echo "=== *** FULL 16KB STORAGE DUMP COMPLETE -> $ACCUM/storage_dump.bin ($(stat -c %s $ACCUM/storage_dump.bin) B) ***" | tee -a "$LOG"; break
   fi
   echo "=== FULLDUMP run  accum=$N/66 (storage $SC/64)  $(date '+%H:%M:%S') ===" | tee -a "$LOG"
-  G_CLKGEN=166666667 G_OFFSET=-45 G_WIDTH=5 G_US_MIN=180.3 G_US_MAX=181.8 G_US_STEP=0.006 \
-  G_RND_REP=1 G_REPEATS=6 G_RND_LO=33 G_RND_HI=45 G_SAMPLES=3 G_COOLDOWN=0.15 G_REST_S=0 \
+  G_CLKGEN=166666667 G_OFFSET=-45 G_WIDTH=5 G_US_MIN=180.0 G_US_MAX=182.8 G_US_STEP=0.006 \
+  G_RND_REP=1 G_RND_LO=33 G_RND_HI=45 G_SAMPLES=3 G_COOLDOWN=0.15 \
   G_RESET_EVERY=1 G_FULL=1 G_PASSES=200 G_SHOTS=2000000 G_RESUME="$ACCUM" G_TAG=fulldump \
   $PY -u rdp1_glitch_campaign_full_mem_dump.py 2>&1 | tee -a "$LOG"
   merge dumps/run_*                     # fold this run's new banks into ACCUM

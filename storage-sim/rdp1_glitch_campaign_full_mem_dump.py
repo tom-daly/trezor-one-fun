@@ -910,9 +910,12 @@ def main():
     global DUMP_DIR, ORACLE
     # path only - the folder is created lazily on the first find (ensure_dump_dir)
     DUMP_DIR = os.path.join('dumps', f'run_{datetime.now():%Y%m%d_%H%M%S}')
-    if os.path.isfile('storage.bin'):
-        ORACLE = open('storage.bin', 'rb').read()
-        print(f'[+] practice oracle: storage.bin ({len(ORACLE)} B, '
+    _oracle_path = os.environ.get('G_ORACLE', 'storage.bin')  # point at the
+    # CURRENT chip's storage image (e.g. chips/chip-c/storage.bin); the working
+    # storage.bin can be stale for a different chip/build.
+    if os.path.isfile(_oracle_path):
+        ORACLE = open(_oracle_path, 'rb').read()
+        print(f'[+] practice oracle: {_oracle_path} ({len(ORACLE)} B, '
               f'informational compare)', flush=True)
     resume = os.environ.get('G_RESUME', '')
     if resume and os.path.isdir(resume):
