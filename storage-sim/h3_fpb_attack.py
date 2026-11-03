@@ -130,7 +130,14 @@ def wr_blob(st, base, blob):
 
 
 def main():
-    gt = open(os.path.join(HERE,'storage.bin'),'rb').read()
+    # Oracle is OPTIONAL. Real seed-bearing device => leave G_ORACLE unset:
+    # there is no known-answer to compare against, so success is judged by the
+    # stage2-done marker + scratch actually being filled, and the dump is ALWAYS
+    # saved. G_ORACLE=<storage.bin> (practice parts only) additionally byte-checks.
+    oracle_path = os.environ.get('G_ORACLE')
+    gt = open(oracle_path,'rb').read() if oracle_path else None
+    out_path = (os.environ.get('G_OUT')
+                or os.path.join(HERE,'dumps','fpb_storage_0_2.bin'))
     s1 = build(STAGE1, S1_BASE); s2 = build(STAGE2, S2_BASE)
     print(f'[+] stage1={len(s1)}B  stage2={len(s2)}B')
 
@@ -168,19 +175,28 @@ def main():
     print(f'[+] stage1-done = 0x{d1:08x} ({"OK" if d1==S1_DONE_VAL else "NOT SET"})')
     print(f'[+] stage2-done = 0x{d2:08x} ({"OK" if d2==S2_DONE_VAL else "NOT SET"})')
     print(f'    scratch head: {out[:16].hex()}')
-    print(f'    flash truth : {gt[:16].hex()}')
+    if gt is not None:
+        print(f'    flash truth : {gt[:16].hex()}')
     nsent = sum(1 for w in range(NWORDS) if struct.unpack('<I',out[4*w:4*w+4])[0]==SENTINEL)
     print(f'    still-sentinel: {nsent}/{NWORDS}')
-    match = out[:NWORDS*4] == gt[:NWORDS*4]
-    if match:
-        o = os.path.join(HERE,'dumps','fpb_storage_0_2.bin'); os.makedirs(os.path.dirname(o),exist_ok=True)
-        open(o,'wb').write(out)
+    # Physical extraction succeeded iff stage2 ran AND scratch actually filled.
+    extracted = (d2 == S2_DONE_VAL) and (nsent < NWORDS)
+    if extracted:
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        open(out_path,'wb').write(out)
+    if gt is not None and extracted and out[:NWORDS*4] == gt[:NWORDS*4]:
         print(f'\n[VERDICT] *** FPB FLASH EXTRACTION WORKS *** 768B (chunks 0-2) dumped '
-              f'byte-exact with NO glitch -> {o}')
+              f'byte-EXACT vs oracle, NO glitch -> {out_path}')
         rc=0
+    elif extracted:
+        tag = ('MISMATCH vs oracle' if gt is not None
+               else 'real-device mode (no oracle)')
+        print(f'\n[VERDICT] *** FPB EXTRACTION SUCCEEDED *** stage2-done OK, '
+              f'{NWORDS-nsent}/{NWORDS} words filled, NO glitch [{tag}] -> {out_path}')
+        rc = 1 if gt is not None else 0
     elif d2==S2_DONE_VAL:
-        print('\n[VERDICT] stage2 ran but data wrong - flash still blocked after FPB '
-              'redirect, or wrong addresses.')
+        print('\n[VERDICT] stage2 ran but scratch still all-sentinel -> flash read '
+              'returned nothing / wrong address.')
         rc=1
     elif d1==S1_DONE_VAL:
         print('\n[VERDICT] stage1 set FPB but stage2 never ran -> FPB remap of the reset '

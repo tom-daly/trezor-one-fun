@@ -21,9 +21,15 @@ Discovers:
   - Bootloader UART 0x7F->0x79 (FTDI, BOOT0 high/BOOT1 low) as a secondary check
   - VERDICT: alive? RDP level (authoritative + cross-check agreement) + summary
 
+SAFE BY DEFAULT: boots the ST system bootloader (BOOT0 high), NEVER the target's
+own Trezor firmware. Booting firmware runs storage_init, which can WIPE the seed
+(FINDINGS 2026-11-03). On a seed-bearing chip, do the FPB dump FIRST regardless.
+
 Env flags:
-  G_DRIVE_BOOT0=1   drive BOOT0 high via TIO1 (enter the bootloader) instead of
-                    trusting a jumper / high_z.
+  G_BOOT_FW=1       OPT IN to booting the device FIRMWARE (BOOT0 low). Practice/
+                    diagnosis only -- CAN WIPE a seed-bearing chip. Loud warning.
+  G_SAFE=1          accepted as a no-op alias for the default safe behavior.
+  G_DRIVE_BOOT0=1   back-compat; same as default (BOOT0 high / bootloader).
   G_OPENOCD=1       also run an independent OpenOCD RDP cross-check (second
                     transport; prints AGREES/DISAGREES vs the authoritative read).
 
@@ -121,19 +127,50 @@ def line(c='-'):
 
 def main():
     R = {}
-    drive_boot0 = bool(os.environ.get('G_DRIVE_BOOT0'))
+    # SAFE BY DEFAULT. This tool NEVER boots the target's own Trezor firmware
+    # unless you explicitly ask. Booting firmware runs storage_init, which can
+    # WIPE storage it cannot validate -- this is how chip-2's wallet was lost
+    # (FINDINGS 2026-11-03). By default we enter the ST system bootloader (ROM,
+    # no user-storage access) so firmware never executes and storage is preserved.
+    # Always do the FPB dump FIRST on a seed-bearing chip regardless.
+    #
+    # G_BOOT_FW=1  : OPT IN to booting device firmware (practice/diagnosis only;
+    #                prints a loud warning). G_SAFE=1 is accepted as a no-op alias
+    #                for the default safe behavior. G_DRIVE_BOOT0=1 also = safe
+    #                (BOOT0 high) and is kept for back-compat.
+    boot_fw = os.environ.get('G_BOOT_FW') == '1'
+    drive_boot0 = not boot_fw            # BOOT0 high (ST bootloader) unless opting in
     s = cw.scope()
     s.clock.clkgen_freq = 16e6                 # discipline: clkgen FIRST
     s.io.glitch_hp = False                     # crowbar OFF (read-only)
     s.io.glitch_lp = False
-    # TIO1=BOOT0: 'high_z' trusts the 3V3 jumper; G_DRIVE_BOOT0=1 drives it high
-    # BOOT0=TIO1, BOOT1=TIO2 (driven by CW, not jumpers). For the system
-    # bootloader we need BOOT0=1, BOOT1=0. Use explicit gpio strings (boolean
-    # False did NOT reliably drive a low) and read them back.
-    s.io.tio1 = 'gpio_high' if drive_boot0 else 'high_z'   # BOOT0
+    # BOOT0=TIO1, BOOT1=TIO2 (driven by CW). The ST system bootloader needs
+    # BOOT0=1, BOOT1=0; device firmware needs BOOT0=0, BOOT1=0. Pins are set
+    # BEFORE target_pwr below so they latch at power-on. Use explicit gpio
+    # strings (boolean False did NOT reliably drive a low).
+    s.io.tio1 = 'gpio_high' if drive_boot0 else 'gpio_low'  # BOOT0
     s.io.tio2 = 'gpio_low'                                  # BOOT1 low
     s.io.tio4 = 'high_z'                                    # NRST released
-    print(f"[boot] set TIO1(BOOT0)={s.io.tio1!r}  TIO2(BOOT1)={s.io.tio2!r}")
+    R['boot_mode'] = 'bootloader' if drive_boot0 else 'device'
+    boot_want = ('SYSTEM BOOTLOADER (BOOT0=1,BOOT1=0)' if drive_boot0
+                 else 'DEVICE FIRMWARE (BOOT0=0,BOOT1=0)')
+    if not boot_fw:
+        print("[SAFE default] entering ST bootloader; target FIRMWARE will NOT "
+              "run (storage_init cannot wipe). Storage preserved. "
+              "(set G_BOOT_FW=1 to boot firmware.)")
+    else:
+        print("[!! WARNING] G_BOOT_FW=1: about to BOOT DEVICE FIRMWARE. On a "
+              "seed-bearing chip this runs storage_init, which CAN WIPE the "
+              "wallet. Do the FPB dump FIRST; use this on practice chips only.")
+    print(f"[boot] target boot mode: {boot_want}")
+    print(f"[boot] drive TIO1(BOOT0)={s.io.tio1!r}  TIO2(BOOT1)={s.io.tio2!r}  "
+          f"TIO4(NRST)={s.io.tio4!r}")
+    rb1, rb2 = str(s.io.tio1), str(s.io.tio2)   # CW echoes configured mode
+    want1 = 'gpio_high' if drive_boot0 else 'gpio_low'
+    if rb1 != want1 or rb2 != 'gpio_low':
+        print(f"[boot] !! pin-config readback mismatch: tio1={rb1!r} tio2={rb2!r}")
+    else:
+        print(f"[boot] pin-config confirmed (verified against PC region below)")
     # BOOT pins latch only at a REAL power-on reset. A short dip leaves the
     # chip alive on its caps (+ ST-Link back-power) so the pins never re-latch.
     # Use the campaign's proven timing: 1.5 s off (full drain), then settle.
@@ -380,25 +417,39 @@ def main():
         pc = R.get('pc')
         sp = R.get('sp')
         sram0 = R.get('sram0')
-        in_sram = sp is not None and 0x20000000 <= sp <= 0x20020000
-        if R.get('lockup') and in_sram and sram0 is not None and sp != sram0:
-            # SP is a clean SRAM address that is NOT SRAM[0] -> this is the ST
-            # bootloader's own SP (stable across runs). The lockup/PC=0 is the
-            # ST-Link halting into RDP1-protected bootloader code, not a boot
-            # failure. Boot pins (BOOT0=1,BOOT1=0) are OK.
-            print(f"  CORE STATE : SP=0x{sp:08X} is the ST bootloader SP "
-                  f"(!= SRAM[0]=0x{sram0:08X}).")
-            print("               => LIKELY IN THE BOOTLOADER (BOOT0=1,BOOT1=0).")
-            print("               The LOCKUP is a debug-halt artifact at RDP1.")
-            print("               If UART still silent -> UART WIRING, not boot.")
-        elif R.get('lockup') and in_sram:
-            print("  CORE STATE : LOCKUP, SP tracks SRAM[0] -> SRAM boot "
-                  "(BOOT1 HIGH). Fix BOOT1 (PB2/pin28 -> GND).")
-        elif R.get('lockup'):
-            print("  CORE STATE : LOCKUP, SP all-FF -> blank-FLASH boot "
-                  "(BOOT0 LOW). Fix BOOT0 (pin60/TIO1 -> high).")
-        elif pc is not None and 0x1FFF0000 <= pc <= 0x1FFF8000:
-            print("  CORE STATE : in SYSTEM BOOTLOADER (BOOT0=1,BOOT1=0 OK).")
+        bmode = R.get('boot_mode', 'device')
+        # PC region is the ground truth for what actually booted. The RDP1
+        # debug-halt can raise S_LOCKUP as an artifact even on a healthy boot,
+        # so the verdict keys off the boot pins we DROVE + where PC resolved,
+        # NOT a bare SP pattern.
+        in_flash = pc is not None and 0x08000000 <= pc <= 0x08100000
+        in_sysrom = pc is not None and 0x1FFF0000 <= pc <= 0x1FFF8000
+        sp_sram = sp is not None and 0x20000000 <= sp <= 0x20020000
+        if bmode == 'bootloader':
+            if in_sysrom or (sp_sram and sram0 is not None and sp != sram0):
+                print("  CORE STATE : in SYSTEM BOOTLOADER (BOOT0=1,BOOT1=0 OK).")
+                print("               LOCKUP/PC here is an RDP1 debug-halt artifact.")
+            elif in_flash:
+                print(f"  CORE STATE : PC in MAIN FLASH (0x{pc:08X}) though BOOT0 "
+                      "driven HIGH -> BOOT0 not reaching the pin. Check TIO1/pin60.")
+            else:
+                print("  CORE STATE : indeterminate (see PC/SP above).")
+        else:  # device-firmware boot requested (BOOT0=0, BOOT1=0)
+            if in_flash:
+                print(f"  CORE STATE : running DEVICE FIRMWARE "
+                      f"(main flash, PC=0x{pc:08X}). BOOT0=0,BOOT1=0 OK.")
+                print("               (any LOCKUP flag is an RDP1 debug-halt artifact)")
+            elif in_sysrom:
+                print("  CORE STATE : in SYSTEM BOOTLOADER though BOOT0 driven LOW "
+                      "-> BOOT0 stuck HIGH at pin. Check TIO1/pin60 wiring.")
+            elif sp_sram and sram0 is not None and sp == sram0:
+                print("  CORE STATE : SRAM boot (SP tracks SRAM[0]) -> BOOT1 HIGH. "
+                      "Fix BOOT1 (PB2/pin28 -> GND).")
+            elif sp_sram:
+                print(f"  CORE STATE : SP=0x{sp:08X} in SRAM, PC not in flash -> "
+                      "firmware early-faulted or halted mid-reset; re-run.")
+            else:
+                print("  CORE STATE : indeterminate (see PC/SP above).")
         ua = R.get('uart_ack')
         print(f"  BOOTLOADER : {'ACK' if ua is True else ua} (secondary; "
               f"needs BOOT0 high + UART wiring)")

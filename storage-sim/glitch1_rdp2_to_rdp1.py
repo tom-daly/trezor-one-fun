@@ -40,6 +40,7 @@ G1_BOOT0 (low|high), G1_STOP_ON_SUCCESS, G1_COOLDOWN.
 Run: /home/tdaly/.cwvenv/bin/python glitch1_rdp2_to_rdp1.py
 """
 import os
+import sys
 import csv
 import gc
 import time
@@ -58,7 +59,21 @@ OFFSET   = int(os.environ.get('G1_OFFSET', -45))
 # The TIO that is wired to NRST (pin 7). It both drives reset low and triggers
 # the glitch on its own release edge - one pin, no separate sense wire.
 NRST     = os.environ.get('G1_NRST', 'tio4').lower()
-BOOT0_HI = os.environ.get('G1_BOOT0', 'low').lower() in ('high', '1', 'hi')
+# DEFAULT BOOT0 HIGH = ST system bootloader. This is a REAL-DEVICE tool, and
+# booting the Trezor FIRMWARE (BOOT0 low) runs storage_init, which can WIPE the
+# seed (see FINDINGS 2026-11-03). The RDP2->RDP1 glitch targets the BootROM
+# option-byte RDP read, which happens at reset REGARDLESS of BOOT0, and success =
+# SWD opens (RDP-gated, not BOOT0-gated) -> it works from the system bootloader
+# with NO Trezor flash code executing. Firmware boot is gated behind an override.
+BOOT0_HI = os.environ.get('G1_BOOT0', 'high').lower() in ('high', '1', 'hi')
+if not BOOT0_HI and os.environ.get('G1_ALLOW_FW_BOOT') != 'YES':
+    sys.exit(
+        '\n' + '!' * 70 +
+        '\nREFUSED: G1_BOOT0=low boots the TREZOR STOCK BOOTLOADER + FIRMWARE,\n'
+        'which runs storage_init and can WIPE the seed on the real device. The\n'
+        'glitch does NOT need firmware - it targets the BootROM RDP read and\n'
+        'succeeds when SWD opens. Use BOOT0 HIGH (system bootloader = default).\n'
+        'Practice board only: re-run with  G1_ALLOW_FW_BOOT=YES\n' + '!' * 70)
 STOP_OK  = os.environ.get('G1_STOP_ON_SUCCESS', '1') == '1'
 COOLDOWN = float(os.environ.get('G1_COOLDOWN', 0.1))
 # Trigger method / t=0 frame. THIS IS THE MOST IMPORTANT KNOB - the three

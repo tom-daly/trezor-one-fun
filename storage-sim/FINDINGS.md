@@ -4257,3 +4257,129 @@ CONSEQUENCE for the real-device chain:
   SECONDARY fallback target: the transient HW_ENTROPY_DATA raw-44B window
   (main() -> first storage_init) could in principle be caught by a boot-time
   SWD attach, but persistence of hardware_salt makes it unnecessary.
+
+## 2026-11-03  chip-2 FPB EXTRACTION WORKS (transient first miss) — but chunks 0-2 are all-FF
+- Re-ran h3_fpb_attack.py x2 on chip-2: BOTH succeeded. stage1-done 0x51A1E001,
+  stage2-done 0xD09ED09E, 192/192 words filled. The single earlier failure
+  (clean-zero scratch) was a TRANSIENT redirect miss - these non-ST clone parts
+  (REV_ID 0x200F) are flaky on the vector-catch; a straight retry fires it. All
+  primitives had already verified green (remanence/SRAM-boot/stage1-arms-FPB/
+  FPB-survives-NRST), so the fix was simply: retry.
+- BUT scratch head = ffffffff... => first 768B of sector 0x08008000 is ERASED.
+  This does NOT mean seedless: NORCOW is a 2-sector store (0x08008000 + 0x0800C000,
+  16KB each). On a used device the ACTIVE sector may be 0x0800C000, and/or live
+  entries are appended deeper than the first 768B. 768B sufficed only for FRESH
+  chip-c. => MUST dump the FULL 32KB NORCOW (both sectors) to locate NORCOW magic
+  (4e524332 "NRC2") + the encrypted PIN/mnemonic entries.
+- NOTE: a chip with chip-2's exact fingerprint (IDCODE 0x2ba01477 / DBGMCU
+  0x200F6411) was logged 2026-11-02 as a clone at RDP1 with firmware present but
+  BOTH storage sectors fully erased. Must confirm chip-2 is not that blank part;
+  the full-storage dump settles it.
+- chips/chip-2/storage_fpb_0_2.bin written (768B, all-FF) - superseded by the
+  full-storage dump next.
+
+## 2026-11-03  chip-2 FULL flash dump — STORAGE ERASED, no seed present
+- fpb_fulldump.py (512KB, 8x64KB FPB chunks, caps on, non-destructive) succeeded
+  on chip-2. -> chips/chip-2/flash_fulldump.bin (also dumps/flash_fulldump.bin).
+- Bootloader (0x08000000/0x08004000) + firmware (0x08010000..0x0807FFFF) ~98%
+  populated = genuine Trezor-type firmware.
+- STORAGE: sector2 0x08008000 = 0/16384 non-FF; sector3 0x0800C000 = 0/16384
+  non-FF. FULL 32KB NORCOW region = 0/32768 non-FF. COMPLETELY ERASED.
+- "NRC2" magic hits only at 0x08049bd8/0x08049c8c = inside firmware CODE (the
+  norcow magic constant), NOT a storage-sector header. No NORCOW data anywhere.
+- CONCLUSION: chip-2 has intact firmware but ERASED storage. The encrypted seed
+  lives ONLY in NORCOW storage -> it is NOT recoverable from this chip. Erased
+  flash is physically 0xFF; no undelete.
+- We did NOT erase it: all chip-2 ops this session were read-only/non-destructive
+  (SRAM+power/boot/NRST+FPB reads; no flash/option writes; no RDP downgrade; no
+  readout-unprotect). It arrived blank.
+- IDENTITY: chip-2 fingerprint (IDCODE 0x2ba01477 / DBGMCU 0x200F6411) == the
+  2026-11-02 "chip pulled from a trezor" that was already firmware-present /
+  storage-erased. Almost certainly the same physical clone part. For a genuine
+  seed recovery we need the actual seed-bearing ST STM32F205, not this blank clone.
+- SILVER LINING: the FPB (Obermaier-H3) extraction is now PROVEN on a real-firmware
+  chip at RDP1 end-to-end on this rig (caps on, retry past the flaky first redirect).
+  When the true seed-bearing chip is in the socket, this is the clean no-glitch path.
+
+## 2026-11-03  CORRECTION + CRITICAL DOCTRINE: chip-2 is firmware 1.13.1 (right chip); DO NOT BOOT TARGET FIRMWARE
+- CORRECTION to the "1.12.1 / blank / wrong chip" entries: the 1.12.1 string is
+  the BOOTLOADER version. The FIRMWARE version is in the TRZF image header @0x10000:
+  bytes "01 0d 01 00" = 1.13.1, model "T1B1" (Trezor One). So chip-2 IS the device
+  the user provisioned (upgraded to fw 1.13.1, created a wallet, logged in twice OK).
+- Storage is nonetheless fully erased (both NORCOW sectors 0/16384 non-FF). The
+  wallet existed (two good logins) -> it was wiped AFTER provisioning, i.e. during/
+  after extraction. User h/w note: "some pins got messed up" during the pull.
+- CAUSE (most likely, not provable after the fact): pin-damaged storage left NORCOW
+  inconsistent; then booting the Trezor FIRMWARE ran storage_init, which WIPES
+  storage it cannot validate. We booted device firmware many times on chip-2:
+  investigate_chip.py now drives BOOT0 low = device-firmware boot (added this
+  session per user request), and h3_primitives' flash-boot remanence sweep cold-
+  booted it ~9x. Any boot runs storage_init. No explicit script issued an erase/
+  RDP-change; the wipe path is the firmware's own storage_init.
+- *** DOCTRINE FOR THE REAL SEED-BEARING DEVICE ***
+  NEVER boot the target's own firmware. Booting runs storage_init which can WIPE
+  the very storage we need. Use ONLY:
+    (1) read-only SWD characterization that does NOT execute flash firmware, and
+    (2) the FPB (Obermaier-H3) dump, whose redirect jumps to stage2 so the Trezor
+        firmware NEVER executes -> storage_init never runs -> cannot wipe.
+  Do the FPB storage dump FIRST, before anything that could boot firmware.
+- TODO tooling: add a read-only / no-firmware-boot mode to investigate_chip.py
+  (do NOT drive BOOT0 low on the real target); default the real-device path to it.
+
+## 2026-11-03  PRECISE mechanism of chip-2 wipe (source-grounded) — corrects earlier entry
+- CORRECTION: earlier I implied "booting firmware -> storage_init -> wipe" as if
+  any boot wipes. FALSE. Per storage/norcow.c norcow_init (lines ~250-267): it
+  wipes ONLY if NO sector has the valid NRC2 magic (find_start_offset requires
+  header == NORCOW_MAGIC 0x3243524E) OR on a version downgrade. A HEALTHY wallet
+  has the magic -> found=sectrue -> norcow_wipe() is NOT called. Normal boots of a
+  working wallet do not touch storage.
+- Physical evidence: both sectors 0/32768 non-FF = a CLEAN erase (erase_sector/
+  norcow_wipe), NOT bit-rot. Bit-rot would leave old ciphertext mostly present with
+  only a bad header.
+- Honest chain: (1) ROOT CAUSE = extraction ("messed-up pins": brownout or a
+  partial/interrupted flash write to the storage header during the pull) corrupted
+  the sector header so it no longer read as NRC2; (2) TRIGGER = first firmware boot
+  in the rig (investigate_chip BOOT0-low, then h3_primitives flash-boot remanence
+  sweep ~9x) ran norcow_init, found no valid magic, called norcow_wipe() -> clean
+  erase of both sectors.
+- KEY CONSEQUENCE for the real device: a corrupted-HEADER sector still contains the
+  old encrypted bytes. An FPB raw dump taken BEFORE any firmware boot would capture
+  them (potentially reconstructable). Booting the firmware is what converts
+  "corrupted header" into "zeroed sectors". => FPB-dump raw storage FIRST, never let
+  norcow_init run on the target. Doctrine reaffirmed and now source-justified.
+
+## 2026-11-03  Glitch tools hardened against firmware boot; mixed RDP1/RDP2 fleet workflow
+- Lesson applied (chip-2 wipe): the thing that wipes storage is the TREZOR flash
+  code (stock bootloader -> firmware -> storage_init/norcow_wipe). Both glitch
+  campaigns must boot the ST SYSTEM bootloader (BOOT0 high), never the Trezor flash.
+- glitch1_rdp2_to_rdp1.py: default changed to BOOT0 HIGH (was low). A firmware
+  boot (G1_BOOT0=low) is now REFUSED unless G1_ALLOW_FW_BOOT=YES. The RDP2->RDP1
+  glitch targets the BootROM option-byte RDP read (independent of BOOT0) and
+  succeeds when SWD opens, so it works from the system bootloader with NO Trezor
+  flash execution. (Added `import sys`.)
+- rdp1_glitch_campaign_full_mem_dump.py: verified every power-on is preceded by
+  tio1=True (BOOT0 high); reads flash via the bootloader UART Read-Memory. Trezor
+  flash code never runs. Safe as-is.
+- investigate_chip.py: G_SAFE=1 = firmware-free characterization (enters ST
+  bootloader; warns loudly before any BOOT0-low firmware boot).
+- MIXED FLEET (user has some RDP1, some RDP2 chips): do NOT hard-jumper BOOT0/BOOT1.
+  The RDP1 chips are recovered by FPB, which needs the CW to TOGGLE BOOT0/BOOT1
+  (SRAM-boot 1/1 then flash-boot 0/x); a fixed BOOT0=1/BOOT1=0 jumper blocks FPB.
+  Let the CW drive the boot pins; rely on the safe software defaults above. One rig
+  config then handles both types.
+- PER-CHIP WORKFLOW: socket -> CW holds BOOT0 high (safe) -> read-only RDP check.
+  SWD attaches => RDP1 => FPB-first dump. SWD dead => RDP2 => glitch-1 (BOOT0 high)
+  to transient RDP1 => FPB or glitch-2 UART. Never boot Trezor firmware on any seed
+  chip; dump raw storage before anything runs norcow_init.
+
+## 2026-11-03  investigate_chip.py now SAFE BY DEFAULT (no firmware boot)
+- Flipped the default: investigate_chip.py now enters the ST system bootloader
+  (BOOT0 high) by default and NEVER boots the Trezor firmware unless G_BOOT_FW=1
+  is explicitly set (loud wipe warning). G_SAFE / G_DRIVE_BOOT0 kept as safe
+  aliases. Reverses the earlier-this-session change that made firmware-boot the
+  default (which, with chip-2's already-corrupted storage header, contributed to
+  the wipe). Verified flag logic: default/G_SAFE/G_DRIVE_BOOT0 -> BOOT0 high;
+  only G_BOOT_FW=1 -> BOOT0 low.
+- All three chip tools are now firmware-boot-locked by default: investigate_chip
+  (safe default), glitch1_rdp2_to_rdp1 (BOOT0-high default + refuse), glitch-2
+  campaign (always BOOT0-high).

