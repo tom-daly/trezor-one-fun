@@ -4027,3 +4027,80 @@ chips/chip-c/storage.bin. For a real dump run on chip-c:
   G_ORACLE=chips/chip-c/storage.bin G_CROWBAR=1 ... rdp1_glitch_campaign_full_mem_dump.py
 Stopped the 1000-shot run after the diagnosis (was rejecting good flips vs stale
 oracle). Needed mkdir campaigns dumps/accum (were moved to chip-a).
+
+## 2026-11-03 — scope-damping confirmed on chip-c full-dump run; aborted to remove scope
+During the chip-c full dump the Siglent was still on the VCAP SMA-T (glitch
+node). 165 shots: 2 dead (crowbar landing), 2 resync, 0 SUCCESS, 0 banked -
+vs the quick run's clean flip at #79. Consistent with the known ~15-20pF
+scope-load damping the crowbar pull (weak pull -> no clean flip / ghosts).
+Stopped the campaign + watcher to physically disconnect the scope from VCAP
+(measurement-only discipline). Crowbar FET confirmed HEALTHY on chip-c (dead
+verdicts = pulse lands). Resume the dump with the scope OFF the node:
+  G_ORACLE=chips/chip-c/storage.bin G_CROWBAR=1 G_LP=1 G_US_MIN=180 G_US_MAX=182
+  G_RND_REP=1 G_RND_LO=33 G_RND_HI=45 G_TARGETED_N=6 ... full_mem_dump.py
+
+## 2026-11-03 — EXTERNAL-VCAP-FEED RESEARCH: plan externally validated + stage-1 intel
+Sources gathered supporting the weak-feed topology (Nov 1 plan):
+1. PRIMARY: mkesenheimer.github.io/blog/trezor-wallet-hack-v161.html (Oct 2025,
+   F205 v1.6.1+ attack): "An adjustable power supply (for example RD6006)" is a
+   PREREQUISITE; photo caption: "external power supply connected to VIN1 (be
+   sure to not exceed 1.2V)"; the MUX output IS the V_CAP supply. His working
+   RDP2->RDP1->flash attack RUNS ON the external <=1.2V feed.
+2. HIS V3 HARDWARE (Jan 2026): Pico Glitcher v3 adds NATIVE 1.2V rail support -
+   "glitching is most effective when the glitch amplitude closely matches the
+   target's supply rail". He productized the concept.
+3. GENERALIZED TECHNIQUE: fault-injection-library multiplexing docs - supply
+   switched between voltage LEVELS (not just GND), voltage profiles; mux doubles
+   as target power source (weak feed + crowbar).
+4. ACADEMIC MIRROR: Vosoughi & Kose, GLSVLSI'19 "Leveraging On-Chip Voltage
+   Regulators Against Fault Injection" (saved /tmp/opencode/kose_glsvlsi19.pdf):
+   on-chip VR = documented FI COUNTERMEASURE - single-phase cuts fault count
+   5.45%, 32-phase 91.82%. Converse: the F2's internal LDO is a (mild)
+   countermeasure fighting our crowbar; idling it via external feed removes it.
+   Their cap-size analysis also supports our VCAP cap removal.
+STAGE-1 TACTICAL INTEL from the same post (new firmware):
+   - His t=0 frame = V_CAP RISE, sensed by adjustable Schmitt (EXT1) ON THE
+     VCAP LINE ITSELF - self-relative frame, immune to ramp/NRST differences.
+     That is WHY his numbers transfer across rigs.
+   - Stage-1 sweet: ~180us after VCAP rise (10us later than old-fw 170);
+     combined-attack delay 188.9-189.5us, length 110-130ns.
+   - TRANSLATION TO OUR NRST FRAME (user scope 11-02: VCAP event ~80us,
+     NRST rise ~90us -> NRST lags VCAP by ~10us): sweet = NRST-rise +
+     170-179us; length ~110-130ns (rep 11-13 @100MHz) worth trying beside
+     rep 20. Prior "170-189 swept" runs were with the DEAD crowbar path -
+     the window is effectively unswept.
+CONCLUSION: 305D + series-R weak feed = his topology minus the mux (we keep
+the CW crowbar). Order stands: fix/verify crowbar path FIRST, then add feed.
+
+## 2026-11-03 — RESEARCH LOCKED: external VCAP feed mechanism (bench-supply/LDO interplay)
+Sources: archived kesenheimer-README_FLASH_DUMP.md + stm32f2-bootloader-memread-mux.py
+(lines 178-181), mkesenheimer.github.io Pico Glitcher v2 blog, EFTON gotcha g201,
+Kose GLSVLSI'19 on-chip-VR-countermeasure paper.
+
+FACTS (verified):
+- MUX TOPOLOGY: mkesenheimer's VCAP is wired to the Pico MUX output; idle = VI1
+  = 1.2V CONTINUOUS (bench supply VIN1), glitch = connect GND for t1 ns
+  (`mul_config={"t1":length,"v1":"GND"}`, initial "VI1"). Not a pulse mode -
+  the node is externally paralleled at nominal for the whole session. MUX stage
+  = TS3A4751 analog switch: <=1 Ohm, >=100 mA - hard enough to BE the rail.
+- LDO ON-DIE CANNOT BE DISABLED on F205 (no SMPS/LDO select, unlike F7/H7).
+  External feed can only form a parallel standoff - 3 regimes:
+    below setpoint -> LDO pass stays OPEN, wins (no gain);
+    at setpoint    -> benign standoff (his rig; EFTON g201 hotwire precedent);
+    above setpoint (~1.25-1.30V) -> LDO pass CLOSES = "LDO idled" (Kose framing).
+- DIAGNOSTIC/TRICK: raise VIN with 305D in CC (~30-50mA limit) and watch the
+  bench current step from ~0 to full core draw (~10-30 mA) -> that step marks
+  the die's LDO setpoint and proves LDO is shut. 305D CC readout = free meter.
+- CANNOT: disable LDO (impossible), park rail LOW (LDO fights to setpoint),
+  deepen collapse (11-01 scope ladder already hits 0V at r6, below-GND at r7).
+  REAL VALUE of feed: ringdown damping (~500-600ns underdamped ringback),
+  shot-to-shot shape repeatability, and a deterministic shallow-dip knob
+  (source impedance via series R) for the over-glitching hypothesis.
+- CAUTIONS: >=3.3V into VCAP kills the core (multiple documented cases);
+  keep VIN <= ~1.30V - overdriving only makes the core harder to glitch.
+ORDER (updated - crowbar path verified healthy 11-01, so feed is next):
+  1) 305D + series R (100 then 22/10 Ohm) -> VCAP node, CC 50mA, find setpoint
+     via CC readout, settle feed at nominal ~1.20V.
+  2) Re-run r4-r7 depth ladder (scope off node during firing) vs 11-01
+     captures - compare ringdown shape/repeatability.
+  3) Shallow-band flip sweep (r4/r5 + width-shaped partial dips) with feed in.
